@@ -1,0 +1,87 @@
+---
+title: Flight check
+description: Detects unauthorized flight mode activation
+---
+
+The flight check detects when a player enables flying without permission. This is one of the most severe violations since creative flight gives players an unfair advantage.
+
+## What it detects
+
+This check monitors `SetMovementStates` packets for the `flying` flag. When a player sends a movement state update with `flying: true`, the check immediately flags it as a violation.
+
+<Warning>
+The flight check has the highest VL weight (10.0) because flight mode is typically only available in creative mode. A single violation often indicates a modified client.
+</Warning>
+
+## How it works
+
+The check examines each `PlayerInput.InputUpdate` during movement processing:
+
+```java
+if (update instanceof PlayerInput.SetMovementStates(MovementStates states)) {
+    if (states.flying) {
+        return CheckResult.fail("Flying", 10.0);
+    }
+}
+```
+
+When the `flying` state is detected, the check returns a failure with:
+- **Reason**: "Flying"
+- **VL weight**: 10.0
+
+## VL weight
+
+**10.0** - This is the highest weight among all built-in checks. A single violation typically meets most ban thresholds.
+
+## When it triggers
+
+The flight check triggers when:
+- A player activates creative flight mode without permission
+- A modified client spoofs the flying movement state
+- A player attempts to toggle flight using client-side mods
+
+## When it doesn't trigger
+
+- Players in spectator mode (handled by Hytale's permission system)
+- Players with explicit flight permissions (you should implement permission checks before Spectre processes movement)
+- Players using server-authorized velocity (like elytra or custom flight items)
+
+<Info>
+If you implement custom flight mechanics (like elytra or vehicles), grant players the appropriate permissions or apply server velocity instead of allowing client-side flying state.
+</Info>
+
+## Implementation reference
+
+**Source**: `FlightCheck.java:36-39`
+
+```java
+@Override
+public CheckResult onMovementUpdate(
+        UUID playerId,
+        PlayerRef playerRef,
+        PlayerInput.InputUpdate update,
+        Vector3d fromPosition,
+        Vector3d toPosition,
+        MovementStates movementStates,
+        MovementManager movementManager,
+        float dt,
+        boolean inServerVelocity
+) {
+    if (update instanceof PlayerInput.SetMovementStates(MovementStates states)) {
+        if (states.flying) {
+            return CheckResult.fail("Flying", 10.0);
+        }
+    }
+    return CheckResult.passed();
+}
+```
+
+## Disabling the check
+
+If you need to disable the flight check (for example, in a creative server), you can do so in your `config.yml`:
+
+```yaml
+checks:
+  Flight:
+    enabled: false
+```

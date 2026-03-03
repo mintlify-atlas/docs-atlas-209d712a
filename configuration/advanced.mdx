@@ -1,0 +1,272 @@
+---
+title: Advanced Configuration
+description: Fine-tune velocity exemptions, mantle limits, speed buffers, and system behavior
+---
+
+This page covers advanced configuration constants that control edge cases, exemptions, and check-specific parameters.
+
+## Velocity Exemption Window
+
+Spectre exempts players from movement checks when the server applies velocity (knockback, launch pads, dashes). The exemption window is defined in `ACInputSystem.java:64`:
+
+```java
+private static final long VELOCITY_EXEMPTION_DURATION_MS = 600;
+```
+
+Players are exempt from **all movement checks** for **600 milliseconds (0.6 seconds)** after any server-applied velocity event.
+
+**Exemption triggers:**
+- Knockback simulation active (`KnockbackSimulation` component present)
+- Pending velocity instructions (`Velocity` component has non-empty instructions)
+- Within 600ms of the last velocity event
+
+<Info>
+This window is calibrated for dash/lunge abilities. If your server has faster movement abilities, you may need to increase this value.
+</Info>
+
+### How It Works
+
+When server velocity is detected in `ACInputSystem.java:198-199`:
+
+```java
+if (hasPendingVelocity) {
+    velocityExemptionExpiry.put(playerId, System.currentTimeMillis() + VELOCITY_EXEMPTION_DURATION_MS);
+}
+```
+
+The exemption is checked before running movement validation in `ACInputSystem.java:130`:
+
+```java
+boolean inServerVelocity = checkServerVelocity(store, entityRef, playerId);
+```
+
+If `inServerVelocity` is true, the Speed checks pass automatically in `SpeedCheck.java:48`:
+
+```java
+if (inServerVelocity) {
+    return CheckResult.passed();
+}
+```
+
+<Warning>
+Setting this value too high (>1000ms) may allow speed hackers to exploit the window by triggering velocity events repeatedly.
+</Warning>
+
+## Mantle Duration Limit
+
+The mantle check prevents players from staying in the mantling state indefinitely. The limit is defined in `MantleCheck.java:20`:
+
+```java
+private static final int MAX_MANTLE_TICKS = 30; // ~1 second
+```
+
+If a player remains in the mantling state for more than **30 ticks (~1 second)**, they fail the "Spoofed Mantle State" check with a VL weight of 5.0.
+
+**Why this exists:** Legitimate mantling animations complete in under 1 second. Prolonged mantle states indicate:
+- Modified clients spoofing the mantle flag
+- Exploits to maintain invincibility or collision bypass
+- Glitches in the movement state machine
+
+<Note>
+This timer resets immediately when the player exits the mantling state, so repeated legitimate mantles won't accumulate.
+</Note>
+
+## Speed Check Buffers
+
+Speed checks use multiplicative and additive buffers to account for client-server desync and edge cases. These constants are defined in `SpeedCheck.java`:
+
+### Multiplicative Buffer
+
+```java
+public static final double SPEED_BUFFER_MULTIPLIER = 1.35;
+```
+
+Applied to all speed limits before comparison. This gives players **35% leeway** above the theoretical maximum speed.
+
+### Additive Buffers
+
+```java
+public static final double VERTICAL_BUFFER_ADDITIVE = 1.35;
+public static final double LATERAL_BUFFER_ADDITIVE = 1.35;
+```
+
+Added to limits after multiplication. Combined with the multiplier, the effective speed calculation in `SpeedCheck.java:105` and `SpeedCheck.java:143` is:
+
+```java
+// Vertical limit
+return (maxVerticalSpeed * SPEED_BUFFER_MULTIPLIER) + VERTICAL_BUFFER_ADDITIVE;
+
+// Lateral limit
+return (maxLateralSpeed * SPEED_BUFFER_MULTIPLIER) + LATERAL_BUFFER_ADDITIVE;
+```
+
+**Example:** For a base lateral speed of 10.0:
+- Multiplied: 10.0 × 1.35 = 13.5
+- Added: 13.5 + 1.35 = **14.85 effective limit**
+
+<Info>
+These buffers are intentionally generous to prevent false positives from network latency and tick timing variations.
+</Info>
+
+### Combat Momentum Multiplier
+
+```java
+public static final double COMBAT_MOMENTUM_MULTIPLIER = 1.2;
+```
+
+Applied to lateral speed limits when the player is airborne (in addition to Hytale's built-in `airSpeedMultiplier` and `comboAirSpeedMultiplier`):
+
+```java
+if (!movementStates.onGround) {
+    maxLateralSpeed *= settings.airSpeedMultiplier;
+    maxLateralSpeed *= settings.comboAirSpeedMultiplier;
+    maxLateralSpeed *= COMBAT_MOMENTUM_MULTIPLIER;
+}
+```
+
+This accounts for combat knockback and air-strafing mechanics.
+
+### Step Height
+
+```java
+public static final double MAX_STEP_HEIGHT = 1.1;
+```
+
+Players can instantly step up vertical distances ≤ 1.1 blocks without triggering vertical speed checks. This mimics vanilla Minecraft behavior.
+
+Implementation in `SpeedCheck.java:58-61`:
+
+```java
+if (movementStates.onGround && !movementStates.mantling) {
+    double deltaY = toPosition.y - fromPosition.y;
+    if (deltaY > 0 && deltaY <= MAX_STEP_HEIGHT) {
+        return CheckResult.passed();
+    }
+}
+```
+
+### Fall Speed Limit
+
+```java
+public static final double MAX_FALLING_SPEED = 60.0;
+```
+
+Maximum allowed falling speed before triggering vertical speed checks. This prevents detection of legitimate long falls.
+
+<Warning>
+Do not set `MAX_FALLING_SPEED` below 50.0 or players falling from tall structures will be falsely flagged.
+</Warning>
+
+## Packet Rate Limit
+
+The packet rate check prevents input queue flooding. The limit is defined in `PacketRateCheck.java:15`:
+
+```java
+private static final int MAX_UPDATES_PER_TICK = 20;
+```
+
+If a player queues more than **20 input updates in a single tick**, they fail the "Packet Rate Exceeded" check with a VL weight of 3.0.
+
+**Mitigation:** When the rate limit is exceeded, the system trims excess packets in `ACInputSystem.java:139-141`:
+
+```java
+while (movementUpdateQueue.size() > 20) {
+    movementUpdateQueue.removeLast();
+}
+```
+
+This prevents the server from processing thousands of fake input packets from modified clients.
+
+<Note>
+Legitimate players rarely send more than 5 updates per tick. A threshold of 20 provides a safe margin.
+</Note>
+
+## Relative Movement Limit
+
+The relative movement check prevents teleportation exploits via relative movement packets. The limit is in `RelativeSpeedCheck.java:18`:
+
+```java
+public static final double MAX_RELATIVE_MOVEMENT = 2.0;
+```
+
+Relative movement packets with a magnitude exceeding **2.0 blocks** are rejected.
+
+**Calculation:**
+```java
+double magnitude = Math.sqrt(
+    relativeMovement.getX() * relativeMovement.getX() +
+    relativeMovement.getY() * relativeMovement.getY() +
+    relativeMovement.getZ() * relativeMovement.getZ()
+);
+```
+
+This prevents clients from sending packets like `RelativeMovement(100, 100, 100)` to teleport across the map.
+
+## Disconnecting Players Exemption
+
+When a player disconnects, they are immediately marked as disconnecting in `PlayerListener.java:27`:
+
+```java
+checkManager.markDisconnecting(playerId);
+```
+
+All checks are bypassed for disconnecting players in `CheckManager.java:55-57`:
+
+```java
+if (isDisconnecting(playerId)) {
+    return CheckResult.passed();
+}
+```
+
+This prevents false positives from network timeouts and irregular disconnect behavior.
+
+<Info>
+Disconnecting players are not removed from the `disconnectingPlayers` set until their next login. This is intentional to handle race conditions.
+</Info>
+
+## System Dependencies
+
+The anticheat system runs **before** critical movement systems to intercept cheats before they affect gameplay. Dependencies are defined in `ACInputSystem.java:52-58`:
+
+```java
+private final Set<Dependency<EntityStore>> deps = Set.of(
+    new SystemDependency<>(Order.BEFORE, PlayerSystems.ProcessPlayerInput.class),
+    new SystemDependency<>(Order.BEFORE, PlayerSystems.BlockPausedMovementSystem.class),
+    new SystemDependency<>(Order.BEFORE, MountSystems.HandleMountInput.class),
+    new SystemDependency<>(Order.BEFORE, DamageSystems.FallDamagePlayers.class),
+    new SystemDependency<>(Order.BEFORE, KnockbackPredictionSystems.CaptureKnockbackInput.class)
+);
+```
+
+This ensures:
+- Cheated movement is canceled before it processes
+- Fake inputs don't trigger fall damage
+- Exploited knockback doesn't affect prediction
+
+<Warning>
+Changing system order may cause checks to run after exploits have already taken effect, rendering them useless.
+</Warning>
+
+## Position Correction
+
+When a check fails, the player is teleported back to their last valid position via `ACInputSystem.java:230-238`:
+
+```java
+var teleportPacket = new ClientTeleport(
+    (byte) 0,
+    new ModelTransform(
+        PositionUtil.toPositionPacket(correctedPosition),
+        PositionUtil.toDirectionPacket(rotation),
+        PositionUtil.toDirectionPacket(headRotation)
+    ),
+    false
+);
+```
+
+Additionally, movement states are reset to prevent lingering effects:
+
+```java
+var statePacket = new SetMovementStates(new SavedMovementStates(false));
+```
+
+This prevents exploits where players accumulate invalid states (like flying or mantling) that persist after correction.

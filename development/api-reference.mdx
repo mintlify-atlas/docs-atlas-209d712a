@@ -1,0 +1,565 @@
+---
+title: API reference
+description: Complete reference for Spectre's public API classes
+---
+
+Spectre provides a server-side API for creating custom anticheat checks, tracking violations, and handling cheating detection events.
+
+## Check
+
+Abstract base class for all anticheat checks. Extend this class to implement custom detection logic.
+
+**Package**: `dev.solarion.anticheat.check`
+
+### Methods
+
+#### getName()
+
+```java
+public abstract String getName()
+```
+
+Returns the check identifier used in logs and alerts.
+
+**Returns**: String identifier for this check (e.g., "Speed", "Flight")
+
+---
+
+#### getDescription()
+
+```java
+public abstract String getDescription()
+```
+
+Returns a human-readable description of what this check detects.
+
+**Returns**: Description string (e.g., "Checks for invalid lateral and vertical speed")
+
+---
+
+#### onMovementUpdate()
+
+```java
+public abstract CheckResult onMovementUpdate(
+    UUID playerId,
+    PlayerRef playerRef,
+    PlayerInput.InputUpdate update,
+    Vector3d fromPosition,
+    Vector3d toPosition,
+    MovementStates movementStates,
+    MovementManager movementManager,
+    float dt,
+    boolean inServerVelocity
+)
+```
+
+Called for every player movement update. Implement your detection logic here.
+
+<ParamField path="playerId" type="UUID" required>
+  Unique identifier for the player being checked
+</ParamField>
+
+<ParamField path="playerRef" type="PlayerRef" required>
+  Reference to the player entity
+</ParamField>
+
+<ParamField path="update" type="PlayerInput.InputUpdate" required>
+  The input update being processed. Can be `AbsoluteMovement`, `RelativeMovement`, or `SetMovementStates`
+</ParamField>
+
+<ParamField path="fromPosition" type="Vector3d" required>
+  Player position before this update
+</ParamField>
+
+<ParamField path="toPosition" type="Vector3d" required>
+  Player position after this update
+</ParamField>
+
+<ParamField path="movementStates" type="MovementStates" required>
+  Current movement states (sprinting, crouching, flying, onGround, mantling, falling, walking)
+</ParamField>
+
+<ParamField path="movementManager" type="MovementManager" required>
+  Access to movement settings (baseSpeed, jumpForce, multipliers, etc.)
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Delta time in seconds since last update
+</ParamField>
+
+<ParamField path="inServerVelocity" type="boolean" required>
+  Whether player is under server-applied velocity (knockback, dash, launch pad)
+</ParamField>
+
+**Returns**: `CheckResult.passed()` or `CheckResult.fail(reason, vlWeight)`
+
+---
+
+#### onInputQueue()
+
+```java
+public CheckResult onInputQueue(UUID playerId, int queueSize)
+```
+
+Called to check the input queue size. Override to detect packet flooding.
+
+<ParamField path="playerId" type="UUID" required>
+  Unique identifier for the player
+</ParamField>
+
+<ParamField path="queueSize" type="int" required>
+  Number of pending input updates in the queue
+</ParamField>
+
+**Returns**: `CheckResult.passed()` by default. Override to implement rate limiting.
+
+---
+
+#### onPlayerLogout()
+
+```java
+public void onPlayerLogout(UUID playerId)
+```
+
+Called when a player disconnects. Override to clean up per-player state.
+
+<ParamField path="playerId" type="UUID" required>
+  UUID of the player who logged out
+</ParamField>
+
+<Note>
+Spectre automatically cleans up violation levels and alert cooldowns. You only need this if your check maintains custom state.
+</Note>
+
+---
+
+## CheckResult
+
+Record representing the result of a check execution.
+
+**Package**: `dev.solarion.anticheat.check`
+
+### Static Factory Methods
+
+#### passed()
+
+```java
+public static CheckResult passed()
+```
+
+Creates a passing check result.
+
+**Returns**: CheckResult with `failed=false`, `reason="Passed"`, `vlWeight=0.0`
+
+---
+
+#### fail()
+
+```java
+public static CheckResult fail(String reason, double vlWeight)
+```
+
+Creates a failing check result with specified reason and violation weight.
+
+<ParamField path="reason" type="String" required>
+  Human-readable failure reason (e.g., "Lateral Speed", "Flying")
+</ParamField>
+
+<ParamField path="vlWeight" type="double" required>
+  Violation weight to add to player's VL. Recommended ranges:
+  - 1.0-2.0: Minor violations
+  - 3.0-5.0: Moderate violations
+  - 10.0+: Severe violations
+</ParamField>
+
+**Returns**: CheckResult with `failed=true`
+
+---
+
+### Instance Methods
+
+#### failed()
+
+```java
+public boolean failed()
+```
+
+Returns whether this check failed.
+
+---
+
+#### reason()
+
+```java
+public String reason()
+```
+
+Returns the failure reason string.
+
+---
+
+#### vlWeight()
+
+```java
+public double vlWeight()
+```
+
+Returns the violation weight.
+
+---
+
+#### getDisplayName()
+
+```java
+public String getDisplayName()
+```
+
+Returns the display name for this result (same as `reason()`).
+
+---
+
+#### getVlWeight()
+
+```java
+public double getVlWeight()
+```
+
+Returns the violation weight (same as `vlWeight()`).
+
+---
+
+## CheckManager
+
+Manages check registration, execution, and violation handling.
+
+**Package**: `dev.solarion.anticheat.check`
+
+### Methods
+
+#### registerCheck()
+
+```java
+public void registerCheck(Check check)
+```
+
+Registers a check to run on player movement updates.
+
+<ParamField path="check" type="Check" required>
+  The check instance to register
+</ParamField>
+
+---
+
+#### runChecks()
+
+```java
+public CheckResult runChecks(
+    UUID playerId,
+    String playerName,
+    PlayerRef playerRef,
+    PlayerInput.InputUpdate update,
+    Vector3d fromPosition,
+    Vector3d toPosition,
+    MovementStates movementStates,
+    MovementManager movementManager,
+    float dt,
+    boolean inServerVelocity
+)
+```
+
+Runs all registered checks on a movement update. Stops at first failure.
+
+**Returns**: First failing `CheckResult`, or `CheckResult.passed()` if all checks pass
+
+---
+
+#### checkInputQueue()
+
+```java
+public CheckResult checkInputQueue(UUID playerId, int queueSize)
+```
+
+Runs input queue checks on all registered checks.
+
+**Returns**: First failing `CheckResult`, or `CheckResult.passed()`
+
+---
+
+#### reportViolation()
+
+```java
+public void reportViolation(
+    UUID playerId, 
+    String playerName, 
+    PlayerRef playerRef, 
+    CheckResult result
+)
+```
+
+Manually reports a violation to the violation tracker and alert manager.
+
+---
+
+#### onPlayerConnect()
+
+```java
+public void onPlayerConnect(UUID playerId)
+```
+
+Cleans up player state on connect. Removes violation levels, alerts, and pending removals.
+
+---
+
+#### onPlayerLogout()
+
+```java
+public void onPlayerLogout(UUID playerId)
+```
+
+Cleans up player state on logout. Calls `onPlayerLogout()` on all registered checks.
+
+---
+
+#### getViolationTracker()
+
+```java
+public ViolationTracker getViolationTracker()
+```
+
+Returns the violation tracker instance.
+
+---
+
+#### isDisconnecting()
+
+```java
+public boolean isDisconnecting(UUID playerId)
+```
+
+Returns whether a player is currently disconnecting (to prevent double-kick).
+
+---
+
+#### markDisconnecting()
+
+```java
+public void markDisconnecting(UUID playerId)
+```
+
+Marks a player as disconnecting.
+
+---
+
+## ViolationTracker
+
+Tracks per-player violation levels with automatic decay.
+
+**Package**: `dev.solarion.anticheat.violation`
+
+### Constants
+
+```java
+public static final double KICK_THRESHOLD = 20.0;
+public static final double DECAY_PER_TICK = 0.05;
+```
+
+- **KICK_THRESHOLD**: Players are kicked when VL reaches this value
+- **DECAY_PER_TICK**: VL decays by this amount every tick (1.0 per second at 20 TPS)
+
+### Methods
+
+#### addViolation()
+
+```java
+public double addViolation(UUID playerId, CheckResult result)
+```
+
+Adds a violation to the player's VL and returns the new total.
+
+<ParamField path="playerId" type="UUID" required>
+  Player's unique identifier
+</ParamField>
+
+<ParamField path="result" type="CheckResult" required>
+  The check result containing the violation weight
+</ParamField>
+
+**Returns**: New violation level after adding this violation
+
+---
+
+#### getViolationLevel()
+
+```java
+public double getViolationLevel(UUID playerId)
+```
+
+Returns the current violation level for a player.
+
+**Returns**: Current VL, or 0.0 if no violations
+
+---
+
+#### decay()
+
+```java
+public void decay(UUID playerId)
+```
+
+Decays the player's VL by `DECAY_PER_TICK`. Called every tick.
+
+---
+
+#### removePlayer()
+
+```java
+public void removePlayer(UUID playerId)
+```
+
+Removes all violation data for a player.
+
+---
+
+#### shouldKick()
+
+```java
+public boolean shouldKick(double violationLevel)
+```
+
+Returns whether a violation level is high enough to kick.
+
+**Returns**: `true` if `violationLevel >= KICK_THRESHOLD`
+
+---
+
+## AlertManager
+
+Manages throttled staff alerts for violations.
+
+**Package**: `dev.solarion.anticheat.alert`
+
+### Constants
+
+```java
+private static final String ALERT_PERMISSION = "solarion.anticheat.alerts";
+private static final long ALERT_COOLDOWN_MS = 2000;
+```
+
+- **ALERT_PERMISSION**: Permission required to receive alerts
+- **ALERT_COOLDOWN_MS**: Minimum time between alerts per player (2 seconds)
+
+### Methods
+
+#### alert()
+
+```java
+public void alert(
+    String playerName, 
+    UUID playerId, 
+    CheckResult result, 
+    double violationLevel
+)
+```
+
+Sends an alert to all staff members with the alert permission. Throttled to prevent spam.
+
+<ParamField path="playerName" type="String" required>
+  Name of the player who violated
+</ParamField>
+
+<ParamField path="playerId" type="UUID" required>
+  Player's unique identifier (for throttling)
+</ParamField>
+
+<ParamField path="result" type="CheckResult" required>
+  The check result
+</ParamField>
+
+<ParamField path="violationLevel" type="double" required>
+  Current violation level
+</ParamField>
+
+---
+
+#### removePlayer()
+
+```java
+public void removePlayer(UUID playerId)
+```
+
+Removes alert throttling state for a player.
+
+---
+
+## ACInputSystem
+
+Entity Component System (ECS) that hooks into Hytale's player input processing to run anticheat checks.
+
+**Package**: `dev.solarion.anticheat.system`
+
+### Constructor
+
+```java
+public ACInputSystem(CheckManager checkManager)
+```
+
+Creates the input system and registers built-in checks.
+
+<ParamField path="checkManager" type="CheckManager" required>
+  The check manager instance to use
+</ParamField>
+
+<Note>
+This system automatically registers itself with Hytale's entity store and runs before player input processing.
+</Note>
+
+### Behavior
+
+- Runs before `PlayerSystems.ProcessPlayerInput` in the tick order
+- Exempts players with permission `solarion.anticheat.bypass`
+- Exempts Creative mode players
+- Decays violation levels every tick
+- Teleports players back to valid positions on check failure
+- Tracks server velocity exemptions (knockback, dashes, launch pads) for 600ms
+
+---
+
+## RemoveCheatingPlayerEvent
+
+Event dispatched when Spectre kicks a player for cheating.
+
+**Package**: `dev.solarion.anticheat.event`
+
+### Record Fields
+
+```java
+public record RemoveCheatingPlayerEvent(
+    @Nonnull PlayerRef player,
+    @Nonnull String reason
+) implements IAsyncEvent<String>
+```
+
+<ParamField path="player" type="PlayerRef" required>
+  Reference to the player being kicked
+</ParamField>
+
+<ParamField path="reason" type="String" required>
+  Kick reason (e.g., "Kicked by Spectre: Lateral Speed")
+</ParamField>
+
+### Usage
+
+Listen to this event to perform custom actions when a player is kicked:
+
+```java
+eventRegistry.registerGlobal(
+    RemoveCheatingPlayerEvent.class, 
+    event -> {
+        // Log to database, notify admins, etc.
+    }
+);
+```
+
+<Warning>
+This is an async event. Do not perform blocking operations in the event handler.
+</Warning>

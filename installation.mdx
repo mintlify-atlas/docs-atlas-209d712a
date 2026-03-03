@@ -1,0 +1,194 @@
+---
+title: Installation
+description: Build and install Spectre on your Hytale server
+---
+
+Spectre is distributed as source code that you build into a plugin JAR. This guide walks you through building Spectre and installing it on your Hytale server.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- **Java 25** - Required for compilation and runtime
+- **Hytale Server** - Version 2026.02.06 or later
+- **Git** - To clone the repository
+
+<Note>
+  Spectre uses Gradle 8.11.1, but the wrapper is included—you don't need to install Gradle separately.
+</Note>
+
+## Build from source
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone Spectre from GitHub:
+
+    ```bash
+    git clone https://github.com/solarion-interactive/spectre.git
+    cd spectre
+    ```
+  </Step>
+
+  <Step title="Build the plugin">
+    Use the included Gradle wrapper to build the ShadowJar:
+
+    <CodeGroup>
+      ```bash Linux/macOS
+      ./gradlew shadowJar
+      ```
+
+      ```powershell Windows
+      .\gradlew.bat shadowJar
+      ```
+    </CodeGroup>
+
+    The build process:
+    - Compiles Java sources from `src/main/java/`
+    - Bundles the manifest from `src/main/resources/manifest.json`
+    - Creates a shaded JAR with all dependencies
+    - Minimizes the JAR size
+
+    <Info>
+      The ShadowJar plugin merges dependencies and minimizes the output. Build artifacts appear in `build/libs/`.
+    </Info>
+  </Step>
+
+  <Step title="Locate the JAR">
+    After a successful build, find the plugin JAR:
+
+    ```bash
+    ls build/libs/
+    ```
+
+    You should see `spectre-1.0-SNAPSHOT-all.jar`.
+  </Step>
+
+  <Step title="Install on your server">
+    Copy the JAR to your Hytale server's mods folder:
+
+    ```bash
+    cp build/libs/spectre-1.0-SNAPSHOT-all.jar /path/to/your/server/mods/
+    ```
+
+    <Warning>
+      The exact mods folder location depends on your server setup. Check your Hytale server documentation for the correct path.
+    </Warning>
+  </Step>
+
+  <Step title="Restart the server">
+    Restart your Hytale server to load Spectre:
+
+    ```bash
+    # Stop the server (method varies by setup)
+    # Then start it again
+    ```
+
+    Watch the server logs for Spectre's initialization message:
+
+    ```log
+    [INFO] Setting up Anticheat
+    ```
+  </Step>
+</Steps>
+
+## Verify installation
+
+To confirm Spectre loaded successfully:
+
+1. Check the server logs for `Setting up Anticheat` during startup
+2. Verify the plugin appears in your server's plugin list
+3. Test that staff members with `solarion.anticheat.alerts` permission receive violation alerts
+
+<Tip>
+  Grant yourself `solarion.anticheat.bypass` permission to test without triggering checks on your own account.
+</Tip>
+
+## Build configuration
+
+Spectre's `build.gradle.kts` configures the plugin build:
+
+```kotlin build.gradle.kts
+plugins {
+    id("java")
+    id("com.gradleup.shadow") version "9.3.0"
+}
+
+group = "dev.solarion"
+version = "1.0-SNAPSHOT"
+
+repositories {
+    mavenCentral()
+    maven {
+        name = "hytale-release"
+        url = uri("https://maven.hytale.com/release")
+    }
+}
+
+dependencies {
+    compileOnly("com.hypixel.hytale:Server:2026.02.06-aa1b071c2")
+}
+
+tasks.shadowJar {
+    mergeServiceFiles()
+    minimize()
+}
+```
+
+Key points:
+- `compileOnly` dependency on Hytale server—assumes the server provides the runtime classes
+- ShadowJar merges service files and minimizes output
+- Targets Hytale server version `2026.02.06-aa1b071c2`
+
+## Plugin manifest
+
+The manifest at `src/main/resources/manifest.json` defines plugin metadata:
+
+```json manifest.json
+{
+  "Group": "Solarion",
+  "Name": "Spectre",
+  "Version": "1.0.0",
+  "Description": "Spectre Anticheat",
+  "Authors": [
+    {
+      "Name": "Solarion Interactive + Contributors"
+    }
+  ],
+  "ServerVersion": "*",
+  "DisabledByDefault": false,
+  "Main": "dev.solarion.anticheat.AnticheatPlugin",
+  "IncludesAssetPack": false
+}
+```
+
+The `Main` field points to `AnticheatPlugin`, which extends `JavaPlugin` and registers Spectre's systems and event listeners.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Build fails with Java version error">
+    Ensure you're using Java 25:
+
+    ```bash
+    java -version
+    ```
+
+    If you have multiple Java versions, set `JAVA_HOME` to point to Java 25.
+  </Accordion>
+
+  <Accordion title="Server doesn't load the plugin">
+    Verify:
+    - The JAR is in the correct mods folder
+    - The server supports Hytale API version 2026.02.06 or later
+    - No conflicting plugins are present
+    - Server logs for error messages during plugin loading
+  </Accordion>
+
+  <Accordion title="Hytale server dependency not found">
+    The build requires access to `https://maven.hytale.com/release`. Check your network connection and ensure the repository is accessible.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+Now that Spectre is installed, proceed to the [Quickstart](/quickstart) guide to configure permissions and see it in action.

@@ -1,0 +1,99 @@
+---
+title: Permissions
+description: Configure who can bypass checks and receive alerts
+---
+
+Spectre uses two permission nodes to control anticheat behavior. These permissions integrate with Hytale's native permission system.
+
+## Permission Nodes
+
+### Bypass Permission
+
+```
+solarion.anticheat.bypass
+```
+
+Players with this permission are completely exempt from all anticheat checks. The system will not run any checks on their movement or input.
+
+<Warning>
+Only grant this permission to trusted staff members. Players with this permission can use any client modifications without detection.
+</Warning>
+
+**Implementation:** The bypass check runs before any movement validation in `ACInputSystem.java:111`:
+
+```java
+if (playerComponent.hasPermission("solarion.anticheat.bypass")) {
+    return;
+}
+```
+
+### Alert Permission
+
+```
+solarion.anticheat.alerts
+```
+
+Players with this permission receive real-time notifications when other players fail anticheat checks.
+
+**Alert format:**
+```
+[Spectre] PlayerName failed CheckName (VL: 5.0)
+```
+
+Alerts are displayed in red (`#ff5555`) and include:
+- Player name who triggered the check
+- Check name that failed
+- Current violation level (VL)
+
+**Implementation:** Alert broadcasts are filtered by permission in `AlertManager.java:38`:
+
+```java
+if (PermissionsModule.get().hasPermission(ref.getUuid(), ALERT_PERMISSION)) {
+    ref.sendMessage(alertMessage);
+}
+```
+
+## Alert Throttling
+
+To prevent spam, alerts are throttled per-player. Each player can only trigger one alert every **2000ms (2 seconds)**, regardless of how many checks they fail.
+
+<Info>
+The alert cooldown is defined in `AlertManager.java:19` as `ALERT_COOLDOWN_MS = 2000`.
+</Info>
+
+If a player fails multiple checks within the cooldown window, only the first failure will generate an alert. This prevents console spam from repeated violations.
+
+## Creative Mode Bypass
+
+Players in Creative mode are automatically exempt from all checks, even without the bypass permission:
+
+```java
+if (playerComponent.getGameMode() == GameMode.Creative) {
+    return;
+}
+```
+
+This bypass is hardcoded in `ACInputSystem.java:114` and cannot be configured.
+
+## Permission Management
+
+Use Hytale's permission system to grant these nodes:
+
+```yaml
+# Example: Grant both permissions to moderators
+groups:
+  moderator:
+    permissions:
+      - solarion.anticheat.bypass
+      - solarion.anticheat.alerts
+
+# Example: Grant only alerts to helpers
+groups:
+  helper:
+    permissions:
+      - solarion.anticheat.alerts
+```
+
+<Note>
+Permission checks run every tick for bypass detection, so permission changes take effect immediately without requiring a restart.
+</Note>

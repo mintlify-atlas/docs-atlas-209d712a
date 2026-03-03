@@ -1,0 +1,106 @@
+---
+title: Packet rate check
+description: Limits the number of movement packets per tick
+---
+
+The packet rate check prevents packet spam attacks by limiting how many movement updates a player can send per server tick. This protects against both malicious exploits and unintentional packet flooding.
+
+## What it detects
+
+This check detects:
+- **Packet flooding**: Clients sending excessive movement packets
+- **Timer exploits**: Modified clients that accelerate packet sending
+- **DoS attacks**: Attempts to overload the server with movement data
+
+## How it works
+
+The check monitors the input queue size before processing movement updates:
+
+```java
+@Override
+public CheckResult onInputQueue(UUID playerId, int queueSize) {
+    if (queueSize > MAX_UPDATES_PER_TICK) {
+        return CheckResult.fail("Packet Rate Exceeded", 3.0);
+    }
+    return CheckResult.passed();
+}
+```
+
+Unlike other checks that run during `onMovementUpdate`, this check uses the **`onInputQueue` hook**, which executes before movement processing begins.
+
+<Info>
+The `onInputQueue` hook is called once per tick with the current queue size for that player. This allows the check to reject excessive packets before they consume server resources.
+</Info>
+
+## Maximum packet rate
+
+**MAX_UPDATES_PER_TICK = 20**
+
+Players are limited to 20 movement packets per server tick. Normal clients send 1-2 packets per tick, so this threshold catches abnormal behavior while allowing network burst tolerance.
+
+## VL weight
+
+**3.0** - Moderate severity. Exceeding the packet rate indicates either:
+- Deliberate packet spam (malicious)
+- Client-side timer modification (cheating)
+- Severe network issues (rare)
+
+## When it triggers
+
+- Timer hacks that accelerate the game client
+- Modified clients sending rapid movement updates
+- Network attacks attempting to flood the server
+- Bots or automated clients with poor rate limiting
+
+## When it doesn't trigger
+
+- Normal gameplay (1-2 packets per tick)
+- Legitimate network burst during lag recovery
+- Players with high but acceptable packet rates (under 20 per tick)
+
+## Why this matters
+
+Packet flooding can:
+- **Degrade server performance**: Processing excessive packets consumes CPU
+- **Desync other players**: Overwhelming the movement queue causes delays
+- **Enable exploits**: Some movement hacks rely on rapid packet sending
+
+<Warning>
+Unlimited packet processing allows timer exploits, where modified clients accelerate their game speed by sending more packets per second.
+</Warning>
+
+## Implementation reference
+
+**Source**: `PacketRateCheck.java:28-33`
+
+```java
+@Override
+public CheckResult onInputQueue(UUID playerId, int queueSize) {
+    if (queueSize > MAX_UPDATES_PER_TICK) {
+        return CheckResult.fail("Packet Rate Exceeded", 3.0);
+    }
+    return CheckResult.passed();
+}
+```
+
+The `onMovementUpdate` hook returns `CheckResult.passed()` immediately since the actual check happens in `onInputQueue`:
+
+```java
+@Override
+public CheckResult onMovementUpdate(
+        UUID playerId,
+        PlayerRef playerRef,
+        PlayerInput.InputUpdate update,
+        Vector3d fromPosition,
+        Vector3d toPosition,
+        MovementStates movementStates,
+        MovementManager movementManager,
+        float dt,
+        boolean inServerVelocity
+) {
+    return CheckResult.passed();
+}
+```
+
+Key constant:
+- `MAX_UPDATES_PER_TICK = 20`

@@ -1,0 +1,116 @@
+---
+title: Built-in checks
+description: Overview of Spectre's server-side anticheat detection system
+---
+
+Spectre includes several built-in checks that detect common movement exploits and malicious client behavior. Each check runs on the server during movement processing and assigns violation levels (VL) when suspicious activity is detected.
+
+## How checks work
+
+Checks are executed during the `onMovementUpdate` lifecycle hook, which processes every player movement packet. When a check detects suspicious behavior, it returns a `CheckResult` with:
+
+- **Failure reason**: A descriptive string identifying what was detected
+- **VL weight**: The violation level weight to add to the player's total
+
+Violation levels accumulate over time. You can configure thresholds and punishments in your `config.yml`.
+
+## Available checks
+
+<CardGroup cols={2}>
+  <Card
+    title="Flight check"
+    icon="plane"
+    href="/checks/flight"
+  >
+    Detects unauthorized flight mode activation
+  </Card>
+  
+  <Card
+    title="Speed check"
+    icon="gauge-high"
+    href="/checks/speed"
+  >
+    Validates lateral and vertical movement speed against server limits
+  </Card>
+  
+  <Card
+    title="Relative speed check"
+    icon="arrows-maximize"
+    href="/checks/relative-speed"
+  >
+    Detects excessive relative movement in client packets
+  </Card>
+  
+  <Card
+    title="Mantle check"
+    icon="hands"
+    href="/checks/mantle"
+  >
+    Prevents mantle glitches and state spoofing
+  </Card>
+  
+  <Card
+    title="Packet rate check"
+    icon="network-wired"
+    href="/checks/packet-rate"
+  >
+    Limits the number of movement packets per tick
+  </Card>
+</CardGroup>
+
+## Understanding VL weights
+
+Each check assigns a different VL weight based on severity:
+
+- **Flight**: 10.0 (instant ban threshold)
+- **Mantle**: 5.0 (severe exploit)
+- **Relative speed**: 3.0 (moderate)
+- **Packet rate**: 3.0 (moderate)
+- **Speed**: 2.0 (minor, may be lag)
+
+<Info>
+VL weights are cumulative. A player who triggers multiple speed violations will eventually reach your configured punishment threshold.
+</Info>
+
+## Customizing checks
+
+You can disable individual checks or create your own by extending the `Check` class:
+
+```java
+public class MyCustomCheck extends Check {
+    @Override
+    public String getName() {
+        return "MyCheck";
+    }
+
+    @Override
+    public String getDescription() {
+        return "Detects custom behavior";
+    }
+
+    @Override
+    public CheckResult onMovementUpdate(
+        UUID playerId,
+        PlayerRef playerRef,
+        PlayerInput.InputUpdate update,
+        Vector3d fromPosition,
+        Vector3d toPosition,
+        MovementStates movementStates,
+        MovementManager movementManager,
+        float dt,
+        boolean inServerVelocity
+    ) {
+        // Your detection logic
+        if (suspicious) {
+            return CheckResult.fail("Custom Violation", 5.0);
+        }
+        return CheckResult.passed();
+    }
+}
+```
+
+Register your custom check in your plugin's `onEnable()` method:
+
+```java
+SpectreAPI.registerCheck(new MyCustomCheck());
+```

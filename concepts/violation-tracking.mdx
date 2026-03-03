@@ -1,0 +1,225 @@
+---
+title: Violation tracking
+description: How Spectre tracks violations with automatic decay and kick thresholds
+---
+
+The `ViolationTracker` maintains per-player violation levels (VL) that accumulate when checks fail and decay over time. This system distinguishes between occasional false positives and sustained cheating.
+
+## Core mechanics
+
+Violation tracking uses a simple numeric accumulator per player:
+
+```java ViolationTracker.java:12-17
+public class ViolationTracker {
+
+    public static final double KICK_THRESHOLD = 20.0;
+    public static final double DECAY_PER_TICK = 0.05;
+
+    private final Map<UUID, Double> violationLevels = new ConcurrentHashMap<>();
+```
+
+- Each player has a single VL value (default: 0.0)
+- VL increases when checks fail, based on the `CheckResult.vlWeight`
+- VL decreases each tick by a fixed decay rate
+- Players are kicked when VL reaches the threshold
+
+<Info>
+A `ConcurrentHashMap` is used because violation tracking occurs across multiple threads (ECS system ticks and event handlers).
+</Info>
+
+## Adding violations
+
+When a check fails, its VL weight is added to the player's total:
+
+```java ViolationTracker.java:20-23
+public double addViolation(UUID playerId, CheckResult result) {
+    if (!result.failed()) return getViolationLevel(playerId);
+    return violationLevels.merge(playerId, result.getVlWeight(), Double::sum);
+}
+```
+
+The `merge()` operation:
+1. Retrieves the current VL (or 0.0 if the player has no violations)
+2. Adds the `vlWeight` from the failed check
+3. Returns the new total VL
+
+### Example violation accumulation
+
+Consider a player triggering multiple checks:
+
+```java
+// Flight check fails (vlWeight: 10.0)
+VL = 0.0 + 10.0 = 10.0
+
+// Speed check fails shortly after (vlWeight: 2.0)
+VL = 10.0 + 2.0 = 12.0
+
+// Another speed check fails (vlWeight: 2.0)
+VL = 12.0 + 2.0 = 14.0
+```
+
+At this point, the player is at 14.0 VL - 6 points away from being kicked.
+
+## Violation decay
+
+VL decays every tick to forgive occasional false positives:
+
+```java ViolationTracker.java:31-36
+public void decay(UUID playerId) {
+    violationLevels.computeIfPresent(playerId, (ignored, vl) -> {
+        vl -= DECAY_PER_TICK;
+        return vl <= 0 ? null : vl;
+    });
+}
+```
+
+The `computeIfPresent()` operation:
+1. Only runs if the player has a VL entry
+2. Subtracts `DECAY_PER_TICK` (0.05) from their current VL
+3. Removes the entry entirely if VL drops to or below zero
+
+<Tip>
+Returning `null` from `computeIfPresent()` removes the map entry, preventing memory leaks from players who had a single violation hours ago.
+</Tip>
+
+### Decay timing
+
+Decay is called once per tick in the `ACInputSystem`:
+
+```java ACInputSystem.java:127
+checkManager.getViolationTracker().decay(playerId);
+```
+
+Assuming a 20 TPS server:
+- 0.05 VL decays per tick
+- 1.0 VL decays per second (20 ticks × 0.05)
+- 20.0 VL (kick threshold) decays in 20 seconds
+
+### Decay vs. accumulation
+
+Decay creates a natural threshold for sustained cheating:
+
+- **Single violation**: A player who triggers a 2.0 VL check once will be back to 0 in 40 ticks (2 seconds)
+- **Sustained cheating**: A player triggering a 2.0 VL check every 5 ticks accumulates faster than decay:
+  - Gain: 2.0 every 5 ticks = 0.4 VL/tick
+  - Decay: 0.05 VL/tick
+  - Net: +0.35 VL/tick
+  - Time to kick: ~57 ticks (~2.8 seconds)
+
+<Warning>
+If your check has false positives that trigger frequently, they will accumulate faster than decay and cause false kicks. Tune your VL weights carefully.
+</Warning>
+
+## Kick threshold
+
+Players are kicked when their VL reaches or exceeds the threshold:
+
+```java ViolationTracker.java:43-45
+public boolean shouldKick(double violationLevel) {
+    return violationLevel >= KICK_THRESHOLD;
+}
+```
+
+The default threshold is 20.0, which balances:
+- Allowing occasional false positives (1-2 violations won't kick)
+- Quickly removing blatant cheaters (10+ VL from flight check needs only 2 more violations)
+- Handling sustained low-level cheating (10 speed violations at 2.0 VL each)
+
+### Kick execution
+
+Kicks are handled by the `CheckManager` to prevent duplicate kicks:
+
+```java CheckManager.java:101-105
+if (violationTracker.shouldKick(vl) && !pendingRemoval.contains(playerId)) {
+    pendingRemoval.add(playerId);
+    markDisconnecting(playerId);
+    removePlayer(playerRef, "Kicked by Spectre: " + result.getDisplayName());
+}
+```
+
+The `pendingRemoval` set ensures:
+1. Only one kick event is dispatched per player
+2. Subsequent violations during the kick process don't trigger duplicate kicks
+3. The player is marked as disconnecting to prevent further check execution
+
+<Note>
+The kick reason includes the check name from `result.getDisplayName()`, so players see "Kicked by Spectre: Flight" or "Kicked by Spectre: Lateral Speed".
+</Note>
+
+## Player lifecycle
+
+VL is cleared when players connect or disconnect:
+
+```java ViolationTracker.java:39-41
+public void removePlayer(UUID playerId) {
+    violationLevels.remove(playerId);
+}
+```
+
+This is called by the `CheckManager` during lifecycle events:
+
+```java CheckManager.java:108-113
+public void onPlayerConnect(UUID playerId) {
+    violationTracker.removePlayer(playerId);
+    alertManager.removePlayer(playerId);
+    pendingRemoval.remove(playerId);
+    disconnectingPlayers.remove(playerId);
+}
+```
+
+```java CheckManager.java:115-123
+public void onPlayerLogout(UUID playerId) {
+    violationTracker.removePlayer(playerId);
+    alertManager.removePlayer(playerId);
+    pendingRemoval.remove(playerId);
+    // Do not remove from disconnectingPlayers here, specific fix for race condition
+    for (Check check : checks) {
+        check.onPlayerLogout(playerId);
+    }
+}
+```
+
+<Warning>
+The `disconnectingPlayers` set is intentionally NOT cleared in `onPlayerLogout()` to prevent a race condition where a player's final movement packets arrive after the logout event.
+</Warning>
+
+## Querying violation levels
+
+You can retrieve a player's current VL for debugging or custom logic:
+
+```java ViolationTracker.java:26-28
+public double getViolationLevel(UUID playerId) {
+    return violationLevels.getOrDefault(playerId, 0.0);
+}
+```
+
+This is used by the `CheckManager` to include VL in log messages and alerts:
+
+```java CheckManager.java:97
+LOGGER.at(Level.WARNING).log("[Spectre] %s failed %s (VL: %.1f)", playerName, result.getDisplayName(), vl);
+```
+
+## Tuning recommendations
+
+### KICK_THRESHOLD
+
+- **Lower (10.0-15.0)**: Faster kicks, but more risk of false positives
+- **Higher (25.0-30.0)**: More forgiving, but allows cheaters to operate longer
+- **Default (20.0)**: Balanced for most servers
+
+### DECAY_PER_TICK
+
+- **Lower (0.01-0.03)**: VL persists longer, punishes repeated violations over minutes
+- **Higher (0.1-0.2)**: VL decays faster, only catches sustained cheating in a short window
+- **Default (0.05)**: 20-second decay window matches typical "combat encounter" duration
+
+### VL weights per check
+
+- **Blatant/unambiguous (10.0)**: Flight, CreativeFly, invalid packets
+- **High confidence (5.0)**: NoFall, Jesus (water walk)
+- **Medium confidence (2.0-3.0)**: Speed, Vertical movement
+- **Low confidence (1.0)**: Suspicious patterns that need multiple triggers
+
+<Tip>
+Monitor your server logs for VL patterns. If you see many players hitting 5-10 VL but never getting kicked, your checks may have false positives that need tuning.
+</Tip>

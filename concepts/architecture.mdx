@@ -1,0 +1,224 @@
+---
+title: Architecture
+description: How Spectre integrates with Hytale's ECS and processes player movement
+---
+
+Spectre is built as a server-side anticheat framework that deeply integrates with Hytale's Entity Component System (ECS). The architecture is designed to intercept and validate player movement before it's processed by the game's core systems.
+
+## ECS integration
+
+Spectre uses a custom `EntityTickingSystem` called `ACInputSystem` that runs **before** Hytale's movement processing systems. This positioning is critical for preventing cheats from affecting the game state.
+
+```java ACInputSystem.java:52-58
+private final Set<Dependency<EntityStore>> deps = Set.of(
+    new SystemDependency<>(Order.BEFORE, PlayerSystems.ProcessPlayerInput.class),
+    new SystemDependency<>(Order.BEFORE, PlayerSystems.BlockPausedMovementSystem.class),
+    new SystemDependency<>(Order.BEFORE, MountSystems.HandleMountInput.class),
+    new SystemDependency<>(Order.BEFORE, DamageSystems.FallDamagePlayers.class),
+    new SystemDependency<>(Order.BEFORE, KnockbackPredictionSystems.CaptureKnockbackInput.class)
+);
+```
+
+By running before these systems, Spectre can:
+- Validate movement inputs before they're applied
+- Cancel invalid movements by teleporting players back
+- Prevent cheats from triggering fall damage, mount bugs, or combat exploits
+
+## Component query
+
+The system queries for entities that have all required player components:
+
+```java ACInputSystem.java:44-50
+private final Query<EntityStore> query = Query.and(
+    Player.getComponentType(),
+    PlayerInput.getComponentType(),
+    TransformComponent.getComponentType(),
+    MovementManager.getComponentType(),
+    MovementStatesComponent.getComponentType()
+);
+```
+
+This ensures the system only processes actual players with complete movement data.
+
+## Tick cycle
+
+On each tick, `ACInputSystem` performs the following steps:
+
+### 1. Bypass checks
+
+Players with the `solarion.anticheat.bypass` permission or in Creative mode skip all checks:
+
+```java ACInputSystem.java:111-116
+if (playerComponent.hasPermission("solarion.anticheat.bypass")) {
+    return;
+}
+if (playerComponent.getGameMode() == GameMode.Creative) {
+    return;
+}
+```
+
+### 2. Violation decay
+
+Violation levels decay naturally each tick to prevent permanent penalties:
+
+```java ACInputSystem.java:127
+checkManager.getViolationTracker().decay(playerId);
+```
+
+### 3. Velocity exemption
+
+Server-applied velocity (dashes, knockback, launch pads) grants temporary exemption from speed checks:
+
+```java ACInputSystem.java:193-209
+private boolean checkServerVelocity(Store<EntityStore> store, Ref<EntityStore> entityRef, UUID playerId) {
+    var knockbackSim = store.getComponent(entityRef, KnockbackSimulation.getComponentType());
+    var velocityComponent = store.getComponent(entityRef, Velocity.getComponentType());
+    boolean hasPendingVelocity = velocityComponent != null && !velocityComponent.getInstructions().isEmpty();
+
+    if (hasPendingVelocity) {
+        velocityExemptionExpiry.put(playerId, System.currentTimeMillis() + VELOCITY_EXEMPTION_DURATION_MS);
+    }
+
+    long now = System.currentTimeMillis();
+    Long exemptExpiry = velocityExemptionExpiry.get(playerId);
+    boolean inVelocityExemption = exemptExpiry != null && now < exemptExpiry;
+    if (exemptExpiry != null && now >= exemptExpiry) {
+        velocityExemptionExpiry.remove(playerId);
+    }
+
+    return knockbackSim != null || hasPendingVelocity || inVelocityExemption;
+}
+```
+
+<Info>
+The default exemption window is 600ms, which covers the travel time of most dashes and lunges.
+</Info>
+
+### 4. Queue validation
+
+The packet rate check runs before processing the movement update queue:
+
+```java ACInputSystem.java:135-142
+CheckResult rateResult = checkManager.checkInputQueue(playerId, movementUpdateQueue.size());
+if (rateResult.failed()) {
+    checkManager.reportViolation(playerId, playerName, playerRefComponent, rateResult);
+    // Trim excess
+    while (movementUpdateQueue.size() > 20) {
+        movementUpdateQueue.removeLast();
+    }
+}
+```
+
+### 5. Movement processing
+
+Each movement update in the queue is processed sequentially:
+
+```java ACInputSystem.java:149-188
+for (PlayerInput.InputUpdate entry : movementUpdateQueue) {
+    Vector3d toPosition = virtualPosition.clone();
+    
+    if (entry instanceof PlayerInput.AbsoluteMovement abs) {
+        toPosition = new Vector3d(abs.getX(), abs.getY(), abs.getZ());
+    } else if (entry instanceof PlayerInput.RelativeMovement rel) {
+        toPosition.add(rel.getX(), rel.getY(), rel.getZ());
+    }
+
+    CheckResult result = checkManager.runChecks(
+        playerId,
+        playerName,
+        playerRefComponent,
+        entry,
+        virtualPosition,
+        toPosition,
+        currentMovementStates,
+        movementManager,
+        dt,
+        inServerVelocity
+    );
+
+    if (result.failed()) {
+        cancelAndCorrect(archetypeChunk, commandBuffer, index, virtualPosition);
+        toRemove.add(entry);
+    } else {
+        // Update virtual position/state for next iteration
+        if (entry instanceof PlayerInput.AbsoluteMovement) {
+            virtualPosition = toPosition;
+        } else if (entry instanceof PlayerInput.RelativeMovement) {
+            virtualPosition = toPosition;
+        } else if (entry instanceof PlayerInput.SetMovementStates(MovementStates movementStates)) {
+            currentMovementStates = movementStates;
+        }
+    }
+}
+```
+
+<Warning>
+Virtual position tracking ensures that multiple movements in a single tick are validated sequentially. If one fails, subsequent movements are checked from the last valid position, not the rejected position.
+</Warning>
+
+## Movement correction
+
+When a check fails, the player is teleported back to their last valid position:
+
+```java ACInputSystem.java:213-245
+private static void cancelAndCorrect(@Nonnull ArchetypeChunk<EntityStore> archetypeChunk,
+                                     @Nonnull CommandBuffer<EntityStore> commandBuffer,
+                                     int index,
+                                     @Nonnull Vector3d correctedPosition) {
+    var transformComponent = archetypeChunk.getComponent(index, TransformComponent.getComponentType());
+    var headRotationComponent = archetypeChunk.getComponent(index, HeadRotation.getComponentType());
+
+    if (transformComponent == null || headRotationComponent == null) {
+        return;
+    }
+
+    var playerRef = archetypeChunk.getReferenceTo(index);
+    var rotation = transformComponent.getRotation();
+    var headRotation = headRotationComponent.getRotation();
+
+    var playerRefComponent = commandBuffer.getComponent(playerRef, PlayerRef.getComponentType());
+    var teleportPacket = new ClientTeleport(
+        (byte) 0,
+        new ModelTransform(
+            PositionUtil.toPositionPacket(correctedPosition),
+            PositionUtil.toDirectionPacket(rotation),
+            PositionUtil.toDirectionPacket(headRotation)
+        ),
+        false
+    );
+    var statePacket = new SetMovementStates(new SavedMovementStates(false));
+
+    if (playerRefComponent != null) {
+        playerRefComponent.getPacketHandler().write(teleportPacket);
+        playerRefComponent.getPacketHandler().write(statePacket);
+    }
+}
+```
+
+This correction:
+- Preserves the player's rotation and head rotation
+- Resets movement states to prevent client-server desync
+- Sends packets directly through the player's packet handler
+
+## Plugin initialization
+
+The `AnticheatPlugin` registers the system and event listeners during setup:
+
+```java AnticheatPlugin.java:23-33
+@Override
+protected void setup() {
+    LOGGER.atInfo().log("Setting up Anticheat");
+
+    CheckManager checkManager = new CheckManager();
+
+    this.getEventRegistry().registerGlobal(RemoveCheatingPlayerEvent.class, new KickListener(checkManager)::onRemoveCheatingPlayerEvent);
+    this.getEventRegistry().registerGlobal(PlayerDisconnectEvent.class, new PlayerListener(checkManager)::onPlayerDisconnect);
+    this.getEventRegistry().registerGlobal(com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent.class, new PlayerListener(checkManager)::onPlayerConnect);
+    
+    this.getEntityStoreRegistry().registerSystem(new ACInputSystem(checkManager));
+}
+```
+
+<Tip>
+The `CheckManager` is shared between the ECS system and event listeners to maintain consistent violation tracking across disconnects and reconnects.
+</Tip>

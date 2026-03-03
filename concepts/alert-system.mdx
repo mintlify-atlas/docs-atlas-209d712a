@@ -1,0 +1,243 @@
+---
+title: Alert system
+description: How Spectre notifies staff of violations with permission-based filtering and throttling
+---
+
+The `AlertManager` sends real-time violation alerts to staff members with the appropriate permissions. Alerts are throttled per-player to prevent spam while keeping staff informed of ongoing cheating.
+
+## Alert permissions
+
+Only staff with the `solarion.anticheat.alerts` permission receive violation alerts:
+
+```java AlertManager.java:18
+private static final String ALERT_PERMISSION = "solarion.anticheat.alerts";
+```
+
+This allows you to:
+- Grant alerts to moderators without giving full anticheat bypass
+- Separate alert viewing from check configuration
+- Control who sees potentially noisy violation messages
+
+<Info>
+The permission check uses Hytale's `PermissionsModule`, so you can grant this permission through your existing permission plugin (LuckPerms, etc.).
+</Info>
+
+## Alert throttling
+
+Alerts are throttled per-player to prevent spam from rapid violations:
+
+```java AlertManager.java:19-21
+private static final long ALERT_COOLDOWN_MS = 2000;
+
+private final Map<UUID, Long> lastAlertTime = new ConcurrentHashMap<>();
+```
+
+Each player has a separate cooldown, so:
+- Multiple players cheating simultaneously all send alerts
+- A single player spamming violations only sends one alert per 2 seconds
+- Staff see the "first" violation in a burst, not every individual trigger
+
+### Throttle logic
+
+Before sending an alert, the system checks the cooldown:
+
+```java AlertManager.java:24-30
+public void alert(String playerName, UUID playerId, CheckResult result, double violationLevel) {
+    long now = System.currentTimeMillis();
+    Long lastTime = lastAlertTime.get(playerId);
+    if (lastTime != null && (now - lastTime) < ALERT_COOLDOWN_MS) {
+        return;
+    }
+    lastAlertTime.put(playerId, now);
+```
+
+If the player's last alert was sent less than 2000ms ago, the new alert is silently dropped. Otherwise, the current timestamp is recorded and the alert proceeds.
+
+<Warning>
+Throttling is based on when alerts are SENT, not when violations occur. If a player triggers checks rapidly, you'll only see alerts every 2 seconds, even if they're violating 20 times per second.
+</Warning>
+
+## Alert message format
+
+Alerts use Hytale's `Message` API for colored chat formatting:
+
+```java AlertManager.java:32-34
+Message alertMessage = Message.raw(
+    String.format("[Spectre] %s failed %s (VL: %.1f)", playerName, result.getDisplayName(), violationLevel)
+).color("#ff5555");
+```
+
+This produces messages like:
+```
+[Spectre] Player123 failed Lateral Speed (VL: 12.5)
+[Spectre] Cheater456 failed Flying (VL: 20.0)
+```
+
+The red color (`#ff5555`) makes alerts stand out in staff chat.
+
+### Alert components
+
+- `[Spectre]` - Prefix to identify anticheat alerts
+- `playerName` - The violating player's username
+- `result.getDisplayName()` - The specific check that failed ("Flight", "Speed", etc.)
+- `violationLevel` - The player's current VL after this violation (formatted to 1 decimal)
+
+<Tip>
+The VL in the alert is the NEW level after adding this violation, not the previous level. This helps staff gauge how close the player is to being kicked (threshold: 20.0).
+</Tip>
+
+## Broadcasting alerts
+
+Alerts are sent to all online players with the permission:
+
+```java AlertManager.java:36-43
+for (PlayerRef ref : Universe.get().getPlayers()) {
+    try {
+        if (PermissionsModule.get().hasPermission(ref.getUuid(), ALERT_PERMISSION)) {
+            ref.sendMessage(alertMessage);
+        }
+    } catch (Exception ignored) {
+    }
+}
+```
+
+The broadcast:
+1. Iterates through all connected players via `Universe.get().getPlayers()`
+2. Checks each player's permissions via `PermissionsModule`
+3. Sends the message directly through their `PlayerRef`
+4. Ignores exceptions (e.g., player disconnected mid-iteration)
+
+<Note>
+Permission checks happen at alert time, not when the violation occurs. If you grant a moderator the alerts permission, they'll immediately start receiving alerts without needing to reconnect.
+</Note>
+
+## Alert lifecycle
+
+The `AlertManager` cleans up throttle data when players disconnect:
+
+```java AlertManager.java:46-48
+public void removePlayer(UUID playerId) {
+    lastAlertTime.remove(playerId);
+}
+```
+
+This is called by the `CheckManager` during lifecycle events:
+
+```java CheckManager.java:108-113
+public void onPlayerConnect(UUID playerId) {
+    violationTracker.removePlayer(playerId);
+    alertManager.removePlayer(playerId);
+    pendingRemoval.remove(playerId);
+    disconnectingPlayers.remove(playerId);
+}
+```
+
+Clearing the throttle map prevents:
+- Memory leaks from players who disconnect after violating
+- Stale cooldowns affecting a player who reconnects (they get a "fresh" alert window)
+
+## Integration with CheckManager
+
+Alerts are sent during violation handling:
+
+```java CheckManager.java:95-99
+private void handleViolation(UUID playerId, String playerName, PlayerRef playerRef, CheckResult result) {
+    if (isDisconnecting(playerId)) {
+        return;
+    }
+
+    double vl = violationTracker.addViolation(playerId, result);
+    
+    LOGGER.at(Level.WARNING).log("[Spectre] %s failed %s (VL: %.1f)", playerName, result.getDisplayName(), vl);
+    
+    alertManager.alert(playerName, playerId, result, vl);
+```
+
+The sequence is:
+1. Check if the player is disconnecting (skip if true)
+2. Add the violation to the tracker and get the new VL
+3. Log the violation to the server console
+4. Send the alert to staff (throttled)
+
+<Info>
+Server logs always record every violation, even if alerts are throttled. Check your console logs for the full violation history.
+</Info>
+
+## Customizing alerts
+
+You can modify the `AlertManager` to customize alert behavior:
+
+### Change alert cooldown
+
+```java
+private static final long ALERT_COOLDOWN_MS = 5000; // 5 seconds instead of 2
+```
+
+### Add clickable player names
+
+```java
+Message alertMessage = Message.raw(
+    String.format("[Spectre] %s failed %s (VL: %.1f)", playerName, result.getDisplayName(), violationLevel)
+)
+.color("#ff5555")
+.clickEvent(ClickEvent.runCommand("/tp " + playerName))
+.hoverEvent(HoverEvent.showText("Click to teleport"));
+```
+
+### Send alerts to Discord
+
+```java
+public void alert(String playerName, UUID playerId, CheckResult result, double violationLevel) {
+    // ... existing throttle logic ...
+    
+    // Send in-game alerts
+    for (PlayerRef ref : Universe.get().getPlayers()) {
+        // ... existing broadcast logic ...
+    }
+    
+    // Send Discord webhook
+    discordWebhook.send(
+        String.format("%s failed %s (VL: %.1f)", playerName, result.getDisplayName(), violationLevel)
+    );
+}
+```
+
+### Per-check alert cooldowns
+
+If you want different cooldowns for different checks:
+
+```java
+private final Map<UUID, Map<String, Long>> lastAlertTime = new ConcurrentHashMap<>();
+
+public void alert(String playerName, UUID playerId, CheckResult result, double violationLevel) {
+    long now = System.currentTimeMillis();
+    var playerCooldowns = lastAlertTime.computeIfAbsent(playerId, k -> new ConcurrentHashMap<>());
+    
+    String checkName = result.getDisplayName();
+    Long lastTime = playerCooldowns.get(checkName);
+    if (lastTime != null && (now - lastTime) < ALERT_COOLDOWN_MS) {
+        return;
+    }
+    playerCooldowns.put(checkName, now);
+    
+    // ... send alert ...
+}
+```
+
+This allows a player to send alerts for different checks simultaneously (e.g., one Flight alert and one Speed alert within 2 seconds).
+
+## Alert vs. log
+
+Spectre maintains two parallel notification systems:
+
+| Feature | Server log | Staff alerts |
+|---------|-----------|-------------|
+| Target | Console/log file | In-game staff |
+| Throttling | None | 2s per player |
+| Completeness | Every violation | Sampled |
+| Permission | N/A | `solarion.anticheat.alerts` |
+| Format | Plain text | Colored chat |
+
+<Tip>
+Use server logs for post-incident analysis ("What did this player do over the last hour?") and staff alerts for real-time response ("Someone is cheating right now").
+</Tip>

@@ -1,0 +1,232 @@
+---
+title: Development setup
+description: Set up your local environment to build and test Spectre
+---
+
+This guide walks you through setting up a local development environment for Spectre. You'll install dependencies, build the plugin, and run it on a local Hytale server.
+
+## Requirements
+
+Before you begin, make sure you have the following installed:
+
+### Java 25
+
+Spectre requires Java 25 to build and run. Verify your Java version:
+
+```bash
+java -version
+```
+
+You should see output indicating Java 25. If not, download and install it from [Oracle](https://www.oracle.com/java/technologies/downloads/) or use a version manager like [SDKMAN!](https://sdkman.io/).
+
+<Note>
+The Hytale Server API is compiled against Java 25. Using an older version will cause build failures.
+</Note>
+
+### Hytale Server
+
+You need a local installation of the Hytale client with server files. The build script uses your Hytale installation to locate `HytaleServer.jar` and `Assets.zip`.
+
+Spectre looks for Hytale in the following locations based on your OS:
+
+- **Windows:** `%APPDATA%\Hytale`
+- **macOS:** `~/Library/Application Support/Hytale`
+- **Linux:** `~/.var/app/com.hypixel.HytaleLauncher/data/Hytale` (Flatpak) or `~/.local/share/Hytale`
+
+### Git
+
+Clone the Spectre repository:
+
+```bash
+git clone https://github.com/yourusername/spectre.git
+cd spectre
+```
+
+## Building Spectre
+
+Spectre uses Gradle with the Shadow plugin to build a fat JAR containing all dependencies.
+
+### Build the plugin
+
+Run the following command to compile and package Spectre:
+
+```bash
+./gradlew shadowJar
+```
+
+On Windows, use:
+
+```powershell
+.\gradlew.bat shadowJar
+```
+
+The built JAR will be located in `build/libs/Spectre-1.0-SNAPSHOT-all.jar`.
+
+<Info>
+The `shadowJar` task creates a self-contained JAR with all dependencies included. This is what you'll load into the Hytale server.
+</Info>
+
+### Build configuration
+
+The `build.gradle.kts` file defines the project structure:
+
+```kotlin
+plugins {
+    id("java")
+    id("com.gradleup.shadow") version "9.3.0"
+}
+
+group = "dev.solarion"
+version = "1.0-SNAPSHOT"
+
+repositories {
+    mavenCentral()
+    maven {
+        name = "hytale-release"
+        url = uri("https://maven.hytale.com/release")
+    }
+}
+
+dependencies {
+    compileOnly("com.hypixel.hytale:Server:2026.02.06-aa1b071c2")
+    testImplementation(platform("org.junit:junit-bom:5.10.0"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+}
+```
+
+Key points:
+- The Hytale Server API is pulled from `https://maven.hytale.com/release`
+- The dependency is `compileOnly` because the server provides it at runtime
+- The Shadow plugin merges and minimizes dependencies into a single JAR
+
+## Running locally
+
+To test your changes, you need to run Spectre on a local Hytale server.
+
+### Quick start
+
+The fastest way to build and run is:
+
+```bash
+clear && ./gradlew shadowJar && ./start_server.sh
+```
+
+On Windows (PowerShell):
+
+```powershell
+Clear-Host; .\gradlew.bat shadowJar; if ($LASTEXITCODE -eq 0) { .\start_server.bat }
+```
+
+This command:
+1. Clears the terminal
+2. Builds the plugin with `shadowJar`
+3. Starts the Hytale server with Spectre loaded from `build/libs/`
+
+### What the script does
+
+The `start_server.sh` script:
+
+- Detects your OS and locates your Hytale installation
+- Sets environment variables for local development:
+  ```bash
+  export BUILD_SERVER_HOST=http://localhost:8080
+  export LOCAL_DEV=true
+  ```
+- Creates a `run/` directory for server files
+- Launches the Hytale server with:
+  ```bash
+  java -jar $HYTALE_HOME/install/release/package/game/latest/server/HytaleServer.jar \
+    --disable-sentry \
+    --mods="build/libs" \
+    --assets="$HYTALE_HOME/install/release/package/game/latest/Assets.zip"
+  ```
+
+The `--mods` flag tells the server to load plugins from `build/libs/`, which is where `shadowJar` outputs the plugin.
+
+<Info>
+The server runs in the `run/` directory. Server logs, world data, and config files are stored there.
+</Info>
+
+### Testing your changes
+
+Once the server starts:
+
+1. Connect to `localhost` using the Hytale client
+2. Trigger the behavior you're testing (e.g., movement patterns for movement checks)
+3. Check the server logs for Spectre output
+4. Verify that checks are working as expected
+
+<Steps>
+  <Step title="Make code changes">
+    Edit files in `src/main/java/dev/solarion/anticheat/`
+  </Step>
+  
+  <Step title="Rebuild and restart">
+    Run `./gradlew shadowJar && ./start_server.sh` to rebuild and restart the server
+  </Step>
+  
+  <Step title="Test in-game">
+    Connect to the server and verify your changes work correctly
+  </Step>
+  
+  <Step title="Check logs">
+    Review server logs in `run/logs/` for errors or Spectre output
+  </Step>
+</Steps>
+
+## Running tests
+
+Spectre uses JUnit 5 for unit tests. Run tests with:
+
+```bash
+./gradlew test
+```
+
+Test results are generated in `build/reports/tests/test/index.html`.
+
+<Note>
+Always run tests before submitting a pull request. If you add new checks, include tests to verify they work correctly and don't produce false positives.
+</Note>
+
+## Project structure
+
+Here's how the Spectre codebase is organized:
+
+```
+src/main/java/dev/solarion/anticheat/
+├── AnticheatPlugin.java        # Main plugin entry point
+├── alert/                       # Alert management system
+├── check/                       # Check framework and implementations
+│   ├── Check.java              # Base check interface
+│   ├── CheckManager.java       # Manages all checks
+│   └── CheckResult.java        # Check result data
+├── event/                       # Custom events
+├── listener/                    # Event listeners
+└── system/                      # ECS systems for input handling
+```
+
+When implementing new checks, you'll primarily work in the `check/` directory.
+
+## Troubleshooting
+
+### Build fails with "Could not resolve dependency"
+
+Ensure you have internet access and can reach `https://maven.hytale.com/release`. If the Hytale Maven repository is down, builds will fail.
+
+### Server fails to start
+
+Verify that:
+- Your Hytale installation is up to date
+- The paths in `start_server.sh` correctly point to your Hytale installation
+- You're using Java 25
+
+### Plugin not loading
+
+Check that:
+- The JAR was built successfully in `build/libs/`
+- The `--mods` flag points to the correct directory
+- There are no errors in the server logs
+
+## Next steps
+
+Now that your environment is set up, review the [contribution guidelines](/contributing/guidelines) to learn about code style, PR requirements, and best practices.

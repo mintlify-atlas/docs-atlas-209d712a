@@ -1,0 +1,369 @@
+---
+title: Check system
+description: How to create and register anticheat checks in Spectre
+---
+
+Spectre's check system is built around the abstract `Check` class, which defines a contract for all movement validation logic. Checks are registered with the `CheckManager` and executed in order during each tick.
+
+## Check interface
+
+Every check extends the `Check` abstract class and implements three core methods:
+
+```java Check.java
+public abstract class Check {
+
+    public abstract String getName();
+    public abstract String getDescription();
+
+    public abstract CheckResult onMovementUpdate(
+        UUID playerId,
+        PlayerRef playerRef,
+        PlayerInput.InputUpdate update,
+        Vector3d fromPosition,
+        Vector3d toPosition,
+        MovementStates movementStates,
+        MovementManager movementManager,
+        float dt,
+        boolean inServerVelocity
+    );
+
+    public CheckResult onInputQueue(UUID playerId, int queueSize) {
+        return CheckResult.passed();
+    }
+
+    public void onPlayerLogout(UUID playerId) {}
+}
+```
+
+### getName()
+
+Returns a short identifier for the check (e.g., "Speed", "Flight"). This name appears in logs and alerts.
+
+### getDescription()
+
+Provides a human-readable description of what the check validates.
+
+### onMovementUpdate()
+
+The primary validation method called for each movement input. You receive:
+
+- `playerId` - The player's UUID for tracking violations
+- `playerRef` - Reference to the player entity for permissions/actions
+- `update` - The specific input update (AbsoluteMovement, RelativeMovement, or SetMovementStates)
+- `fromPosition` - The player's position before this movement
+- `toPosition` - The requested position after this movement
+- `movementStates` - Current movement state (sprinting, crouching, flying, etc.)
+- `movementManager` - Access to movement settings and configuration
+- `dt` - Delta time for this tick
+- `inServerVelocity` - Whether the player has server-applied velocity
+
+<Info>
+The `fromPosition` and `toPosition` are virtual positions tracked across the movement queue, not the actual entity transform. This allows sequential validation of multiple movements in a single tick.
+</Info>
+
+### onInputQueue()
+
+Called once per tick to validate the size of the movement update queue. Used for packet rate limiting.
+
+### onPlayerLogout()
+
+Called when a player disconnects. Use this to clean up any per-player state your check maintains.
+
+## CheckResult
+
+Checks return a `CheckResult` record that indicates success or failure:
+
+```java CheckResult.java
+public record CheckResult(boolean failed, String reason, double vlWeight) {
+
+    public static CheckResult passed() {
+        return new CheckResult(false, "Passed", 0.0);
+    }
+
+    public static CheckResult fail(String reason, double vlWeight) {
+        return new CheckResult(true, reason, vlWeight);
+    }
+
+    public String getDisplayName() {
+        return reason;
+    }
+    
+    public double getVlWeight() {
+        return vlWeight;
+    }
+}
+```
+
+- `failed` - Whether the check detected a violation
+- `reason` - Descriptive name for the violation type
+- `vlWeight` - How much to add to the player's violation level
+
+<Warning>
+Higher VL weights trigger kicks faster. Use high weights (10.0+) for blatant cheats like flight, and lower weights (1.0-3.0) for edge cases that might have false positives.
+</Warning>
+
+## Example: Flight check
+
+The simplest check prevents players from enabling flight mode:
+
+```java FlightCheck.java
+public class FlightCheck extends Check {
+
+    @Override
+    public String getName() {
+        return "Flight";
+    }
+
+    @Override
+    public String getDescription() {
+        return "Checks if player is flying";
+    }
+
+    @Override
+    public CheckResult onMovementUpdate(
+        UUID playerId,
+        PlayerRef playerRef,
+        PlayerInput.InputUpdate update,
+        Vector3d fromPosition,
+        Vector3d toPosition,
+        MovementStates movementStates,
+        MovementManager movementManager,
+        float dt,
+        boolean inServerVelocity
+    ) {
+        if (update instanceof PlayerInput.SetMovementStates(MovementStates states)) {
+            if (states.flying) {
+                return CheckResult.fail("Flying", 10.0);
+            }
+        }
+        return CheckResult.passed();
+    }
+}
+```
+
+This check:
+1. Only examines `SetMovementStates` updates
+2. Fails immediately if flying is enabled
+3. Returns a high VL weight (10.0) because flying is unambiguous
+
+## Example: Packet rate check
+
+This check uses `onInputQueue()` instead of per-movement validation:
+
+```java PacketRateCheck.java
+public class PacketRateCheck extends Check {
+
+    private static final int MAX_UPDATES_PER_TICK = 20;
+
+    @Override
+    public String getName() {
+        return "PacketRate";
+    }
+
+    @Override
+    public String getDescription() {
+        return "Checks for excessive packet rate";
+    }
+
+    @Override
+    public CheckResult onInputQueue(UUID playerId, int queueSize) {
+        if (queueSize > MAX_UPDATES_PER_TICK) {
+            return CheckResult.fail("Packet Rate Exceeded", 3.0);
+        }
+        return CheckResult.passed();
+    }
+
+    @Override
+    public CheckResult onMovementUpdate(
+        UUID playerId,
+        PlayerRef playerRef,
+        PlayerInput.InputUpdate update,
+        Vector3d fromPosition,
+        Vector3d toPosition,
+        MovementStates movementStates,
+        MovementManager movementManager,
+        float dt,
+        boolean inServerVelocity
+    ) {
+        return CheckResult.passed();
+    }
+}
+```
+
+<Tip>
+When `onInputQueue()` fails, `ACInputSystem` trims the excess packets from the queue before processing. This prevents the check from triggering repeatedly on the same oversized queue.
+</Tip>
+
+## Example: Speed check
+
+The speed check demonstrates advanced validation with buffering:
+
+```java SpeedCheck.java:37-91 (simplified)
+@Override
+public CheckResult onMovementUpdate(
+    UUID playerId,
+    PlayerRef playerRef,
+    PlayerInput.InputUpdate update,
+    Vector3d fromPosition,
+    Vector3d toPosition,
+    MovementStates movementStates,
+    MovementManager movementManager,
+    float dt,
+    boolean inServerVelocity
+) {
+    if (inServerVelocity) {
+        return CheckResult.passed();
+    }
+
+    if (!(update instanceof PlayerInput.AbsoluteMovement)) {
+        return CheckResult.passed();
+    }
+
+    // Allow step-up
+    if (movementStates.onGround && !movementStates.mantling) {
+        double deltaY = toPosition.y - fromPosition.y;
+        if (deltaY > 0 && deltaY <= MAX_STEP_HEIGHT) {
+            return CheckResult.passed();
+        }
+    }
+
+    // Allow mantling
+    if (movementStates.mantling) {
+        return CheckResult.passed();
+    }
+
+    var delta = toPosition.clone().subtract(fromPosition);
+
+    // Check horizontal speed
+    var lateralDelta = new Vector3d(delta.x, 0, delta.z);
+    var lateralSpeed = lateralDelta.length() / dt;
+    double lateralLimit = getLateralLimit(movementStates, movementManager);
+
+    if (lateralSpeed > lateralLimit) {
+        return CheckResult.fail("Lateral Speed", 2.0);
+    }
+
+    // Check vertical speed (only fail if not falling)
+    var verticalSpeed = Math.abs(delta.y) / dt;
+    double verticalLimit = getVerticalLimit(movementStates, movementManager, delta.y);
+
+    if (verticalSpeed > verticalLimit && !movementStates.falling) {
+        return CheckResult.fail("Vertical Speed", 2.0);
+    }
+
+    return CheckResult.passed();
+}
+```
+
+This check:
+1. Bypasses validation during server-applied velocity
+2. Allows normal step-up and mantling mechanics
+3. Calculates separate lateral and vertical speed limits
+4. Uses `MovementManager.getSettings()` to respect per-player movement modifiers
+5. Adds buffer multipliers to reduce false positives
+
+<Accordion title="View lateral limit calculation">
+```java SpeedCheck.java:108-144
+private double getLateralLimit(MovementStates movementStates, MovementManager movementManager) {
+    var settings = movementManager.getSettings();
+    double maxLateralSpeed;
+
+    if (movementStates.flying) {
+        maxLateralSpeed = settings.horizontalFlySpeed;
+    } else {
+        double forwardMultiplier;
+        double strafeMultiplier;
+
+        if (movementStates.crouching) {
+            forwardMultiplier = settings.forwardCrouchSpeedMultiplier;
+            strafeMultiplier = settings.strafeCrouchSpeedMultiplier;
+        } else if (movementStates.sprinting) {
+            forwardMultiplier = settings.forwardSprintSpeedMultiplier;
+            strafeMultiplier = settings.strafeRunSpeedMultiplier;
+        } else if (movementStates.walking) {
+            forwardMultiplier = settings.forwardWalkSpeedMultiplier;
+            strafeMultiplier = settings.strafeWalkSpeedMultiplier;
+        } else {
+            forwardMultiplier = settings.forwardRunSpeedMultiplier;
+            strafeMultiplier = settings.strafeRunSpeedMultiplier;
+        }
+
+        double forwardComponent = settings.baseSpeed * forwardMultiplier;
+        double strafeComponent = settings.baseSpeed * strafeMultiplier;
+        maxLateralSpeed = Math.hypot(forwardComponent, strafeComponent);
+
+        if (!movementStates.onGround) {
+            maxLateralSpeed *= settings.airSpeedMultiplier;
+            maxLateralSpeed *= settings.comboAirSpeedMultiplier;
+            maxLateralSpeed *= COMBAT_MOMENTUM_MULTIPLIER;
+        }
+    }
+
+    return (maxLateralSpeed * SPEED_BUFFER_MULTIPLIER) + LATERAL_BUFFER_ADDITIVE;
+}
+```
+</Accordion>
+
+## CheckManager
+
+The `CheckManager` orchestrates all checks and handles violations:
+
+```java CheckManager.java:31-33
+public void registerCheck(Check check) {
+    checks.add(check);
+}
+```
+
+Checks are registered during system initialization:
+
+```java ACInputSystem.java:71-77
+private void registerChecks() {
+    checkManager.registerCheck(new SpeedCheck());
+    checkManager.registerCheck(new RelativeSpeedCheck());
+    checkManager.registerCheck(new FlightCheck());
+    checkManager.registerCheck(new MantleCheck());
+    checkManager.registerCheck(new PacketRateCheck());
+}
+```
+
+### Check execution order
+
+Checks run in registration order. When any check fails, execution stops and the violation is handled:
+
+```java CheckManager.java:59-76
+for (Check check : checks) {
+    CheckResult result = check.onMovementUpdate(
+        playerId,
+        playerRef,
+        update,
+        fromPosition,
+        toPosition,
+        movementStates,
+        movementManager,
+        dt,
+        inServerVelocity
+    );
+
+    if (result.failed()) {
+        handleViolation(playerId, playerName, playerRef, result);
+        return result;
+    }
+}
+return CheckResult.passed();
+```
+
+<Note>
+Register cheaper checks (like FlightCheck) before expensive checks (like SpeedCheck) to fail fast on blatant cheats.
+</Note>
+
+## Disconnection handling
+
+The `CheckManager` tracks disconnecting players to prevent false positives during logout:
+
+```java CheckManager.java:55-57
+if (isDisconnecting(playerId)) {
+    return CheckResult.passed();
+}
+```
+
+This prevents checks from flagging players whose movement becomes erratic during the disconnection process.

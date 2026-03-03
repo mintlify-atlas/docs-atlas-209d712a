@@ -1,0 +1,161 @@
+---
+title: Violation Thresholds
+description: Understand violation levels, kick thresholds, and decay rates
+---
+
+Spectre uses a violation level (VL) system to track player infractions over time. Each failed check adds to a player's VL, which decays gradually and triggers kicks when thresholds are exceeded.
+
+## Kick Threshold
+
+The global kick threshold is defined in `ViolationTracker.java:14`:
+
+```java
+public static final double KICK_THRESHOLD = 20.0;
+```
+
+When a player's total violation level reaches **20.0**, they are automatically kicked from the server with the message:
+
+```
+Kicked by Spectre: [CheckName]
+```
+
+The kick reason includes the name of the check that triggered the final violation.
+
+<Warning>
+Kicks are permanent for the session. The player must reconnect to play again, and their VL resets to 0 on reconnect.
+</Warning>
+
+## Decay Rate
+
+Violation levels decay over time to allow legitimate lag spikes without permanent consequences. The decay rate is:
+
+```java
+public static final double DECAY_PER_TICK = 0.05;
+```
+
+Every server tick (approximately 50ms), each player's VL decreases by **0.05**.
+
+**Decay examples:**
+- VL 10.0 → 0.0: **200 ticks (~10 seconds)**
+- VL 5.0 → 0.0: **100 ticks (~5 seconds)**
+- VL 1.0 → 0.0: **20 ticks (~1 second)**
+
+<Info>
+Decay happens even while the player is moving. It's not paused during violations.
+</Info>
+
+The decay logic runs in `CheckManager.java:127` every tick:
+
+```java
+checkManager.getViolationTracker().decay(playerId);
+```
+
+## Violation Weights by Check
+
+Each check assigns a different VL weight when failed. These weights are defined in the individual check classes:
+
+<CodeGroup>
+```java SpeedCheck.java:78
+return CheckResult.fail("Lateral Speed", 2.0);
+```
+
+```java SpeedCheck.java:87
+return CheckResult.fail("Vertical Speed", 2.0);
+```
+
+```java FlightCheck.java:38
+return CheckResult.fail("Flying", 10.0);
+```
+
+```java RelativeSpeedCheck.java:51
+return CheckResult.fail("Relative Movement Speed", 3.0);
+```
+
+```java MantleCheck.java:49
+return CheckResult.fail("Mantle-Into-Ceiling", 5.0);
+```
+
+```java MantleCheck.java:60
+return CheckResult.fail("Spoofed Mantle State", 5.0);
+```
+
+```java PacketRateCheck.java:30
+return CheckResult.fail("Packet Rate Exceeded", 3.0);
+```
+</CodeGroup>
+
+### Weight Summary Table
+
+| Check Name | Violation Weight | Kicks After (No Decay) |
+|------------|------------------|------------------------|
+| **Flight** | 10.0 | 2 violations |
+| **Mantle-Into-Ceiling** | 5.0 | 4 violations |
+| **Spoofed Mantle State** | 5.0 | 4 violations |
+| **Relative Movement Speed** | 3.0 | 7 violations |
+| **Packet Rate Exceeded** | 3.0 | 7 violations |
+| **Lateral Speed** | 2.0 | 10 violations |
+| **Vertical Speed** | 2.0 | 10 violations |
+
+<Note>
+In practice, players rarely hit these exact counts because VL decays between violations. A player failing a 2.0 weight check repeatedly at 1-second intervals will never be kicked due to decay.
+</Note>
+
+## VL Accumulation Examples
+
+### Example 1: Flight Cheat
+
+1. Player enables flight → +10.0 VL (total: 10.0)
+2. 100 ticks pass (5 seconds) → -5.0 VL (total: 5.0)
+3. Flight detected again → +10.0 VL (total: 15.0)
+4. Flight detected again → +10.0 VL (total: 25.0)
+5. **Kicked** (exceeded 20.0 threshold)
+
+### Example 2: Speed Hacks with Decay
+
+1. Lateral speed violation → +2.0 VL (total: 2.0)
+2. 40 ticks pass (2 seconds) → -2.0 VL (total: 0.0)
+3. Lateral speed violation → +2.0 VL (total: 2.0)
+4. Player stops cheating, VL decays to 0 naturally
+
+### Example 3: Mixed Violations
+
+1. Packet rate exceeded → +3.0 VL (total: 3.0)
+2. Lateral speed violation → +2.0 VL (total: 5.0)
+3. Mantle exploit → +5.0 VL (total: 10.0)
+4. Flight detected → +10.0 VL (total: 20.0)
+5. **Kicked** (exactly at threshold)
+
+## VL Reset Conditions
+
+Violation levels are completely reset (removed from memory) in these scenarios:
+
+1. **Player disconnects** - `CheckManager.java:116`
+2. **Player reconnects** - `CheckManager.java:109`
+3. **Player is kicked by Spectre** - `CheckManager.java:102`
+
+<Info>
+VL does not persist between sessions. Each login starts with a clean slate.
+</Info>
+
+## Modifying Thresholds
+
+To adjust the kick threshold or decay rate, modify these constants in `ViolationTracker.java`:
+
+```java
+// Increase to make kicks less common
+public static final double KICK_THRESHOLD = 30.0; // Default: 20.0
+
+// Increase to make VL decay faster
+public static final double DECAY_PER_TICK = 0.1; // Default: 0.05
+```
+
+To change individual check weights, modify the `CheckResult.fail()` calls in each check class. For example, to make flight detection more lenient:
+
+```java
+// FlightCheck.java:38
+return CheckResult.fail("Flying", 5.0); // Changed from 10.0
+```
+
+<Warning>
+Lowering VL weights or increasing decay rates may allow subtle cheats to go unpunished. Test changes thoroughly on a development server.
+</Warning>

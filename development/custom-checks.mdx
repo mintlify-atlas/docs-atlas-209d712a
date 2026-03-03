@@ -1,0 +1,326 @@
+---
+title: Custom checks
+description: Extend Spectre with your own anticheat checks
+---
+
+You can extend Spectre by creating custom checks that detect specific cheating behaviors. All checks extend the `Check` abstract class and implement detection logic in the movement update callback.
+
+## Creating a basic check
+
+Every check must extend the `Check` abstract class and implement three methods:
+
+```java
+import dev.solarion.anticheat.check.Check;
+import dev.solarion.anticheat.check.CheckResult;
+import com.hypixel.hytale.server.core.entity.entities.player.movement.MovementManager;
+import com.hypixel.hytale.protocol.MovementStates;
+import com.hypixel.hytale.server.core.modules.entity.player.PlayerInput;
+import com.hypixel.hytale.server.core.universe.PlayerRef;
+import com.hypixel.hytale.math.vector.Vector3d;
+import java.util.UUID;
+
+public class MyCustomCheck extends Check {
+
+    @Override
+    public String getName() {
+        return "MyCustomCheck";
+    }
+
+    @Override
+    public String getDescription() {
+        return "Detects custom cheating behavior";
+    }
+
+    @Override
+    public CheckResult onMovementUpdate(
+            UUID playerId,
+            PlayerRef playerRef,
+            PlayerInput.InputUpdate update,
+            Vector3d fromPosition,
+            Vector3d toPosition,
+            MovementStates movementStates,
+            MovementManager movementManager,
+            float dt,
+            boolean inServerVelocity
+    ) {
+        // Implement your detection logic here
+        return CheckResult.passed();
+    }
+}
+```
+
+<Note>
+The `getName()` method returns the check identifier used in logs and alerts. The `getDescription()` method provides a human-readable explanation of what the check detects.
+</Note>
+
+## Movement update callback
+
+The `onMovementUpdate()` method is called for every player movement update. You receive:
+
+<ParamField path="playerId" type="UUID">
+  The unique identifier for the player being checked
+</ParamField>
+
+<ParamField path="playerRef" type="PlayerRef">
+  Reference to the player entity for sending packets or accessing player data
+</ParamField>
+
+<ParamField path="update" type="PlayerInput.InputUpdate">
+  The input update being processed. Can be `AbsoluteMovement`, `RelativeMovement`, or `SetMovementStates`
+</ParamField>
+
+<ParamField path="fromPosition" type="Vector3d">
+  The player's position before this update
+</ParamField>
+
+<ParamField path="toPosition" type="Vector3d">
+  The player's position after this update
+</ParamField>
+
+<ParamField path="movementStates" type="MovementStates">
+  Current movement states (sprinting, crouching, flying, onGround, etc.)
+</ParamField>
+
+<ParamField path="movementManager" type="MovementManager">
+  Access to movement settings like base speed, jump force, and multipliers
+</ParamField>
+
+<ParamField path="dt" type="float">
+  Delta time in seconds since the last update
+</ParamField>
+
+<ParamField path="inServerVelocity" type="boolean">
+  Whether the player is currently under server-applied velocity (knockback, dash, launch pad)
+</ParamField>
+
+## Returning check results
+
+Your check must return a `CheckResult` indicating whether the check passed or failed:
+
+```java
+// Check passed - no violation detected
+return CheckResult.passed();
+
+// Check failed - violation detected
+return CheckResult.fail("Reason for failure", violationWeight);
+```
+
+The violation weight determines how quickly the player's violation level (VL) increases. Higher weights mean faster kicks:
+
+- **1.0-2.0**: Minor violations (slight speed excess)
+- **3.0-5.0**: Moderate violations (packet rate abuse)
+- **10.0+**: Severe violations (flight, impossible movement)
+
+<Warning>
+Players are kicked when their VL reaches 20.0. VL decays at 0.05 per tick (1.0 per second).
+</Warning>
+
+## Example: Flight detection
+
+Here's a simple check that detects when players try to enable flight mode:
+
+```java
+public class FlightCheck extends Check {
+
+    @Override
+    public String getName() {
+        return "Flight";
+    }
+
+    @Override
+    public String getDescription() {
+        return "Checks if player is flying";
+    }
+
+    @Override
+    public CheckResult onMovementUpdate(
+            UUID playerId,
+            PlayerRef playerRef,
+            PlayerInput.InputUpdate update,
+            Vector3d fromPosition,
+            Vector3d toPosition,
+            MovementStates movementStates,
+            MovementManager movementManager,
+            float dt,
+            boolean inServerVelocity
+    ) {
+        if (update instanceof PlayerInput.SetMovementStates(MovementStates states)) {
+            if (states.flying) {
+                return CheckResult.fail("Flying", 10.0);
+            }
+        }
+        return CheckResult.passed();
+    }
+}
+```
+
+## Example: Speed check with exemptions
+
+This example shows how to check lateral speed while exempting server velocity:
+
+```java
+public class SpeedCheck extends Check {
+
+    private static final double SPEED_BUFFER_MULTIPLIER = 1.35;
+    private static final double LATERAL_BUFFER_ADDITIVE = 1.35;
+
+    @Override
+    public String getName() {
+        return "Speed";
+    }
+
+    @Override
+    public String getDescription() {
+        return "Checks for invalid lateral and vertical speed";
+    }
+
+    @Override
+    public CheckResult onMovementUpdate(
+            UUID playerId,
+            PlayerRef playerRef,
+            PlayerInput.InputUpdate update,
+            Vector3d fromPosition,
+            Vector3d toPosition,
+            MovementStates movementStates,
+            MovementManager movementManager,
+            float dt,
+            boolean inServerVelocity
+    ) {
+        // Exempt server velocity (knockback, dashes, launch pads)
+        if (inServerVelocity) {
+            return CheckResult.passed();
+        }
+
+        // Only check absolute movement
+        if (!(update instanceof PlayerInput.AbsoluteMovement)) {
+            return CheckResult.passed();
+        }
+
+        var delta = toPosition.clone().subtract(fromPosition);
+        var lateralDelta = new Vector3d(delta.x, 0, delta.z);
+        var lateralSpeed = lateralDelta.length() / dt;
+        
+        double lateralLimit = calculateLateralLimit(movementStates, movementManager);
+
+        if (lateralSpeed > lateralLimit) {
+            return CheckResult.fail("Lateral Speed", 2.0);
+        }
+
+        return CheckResult.passed();
+    }
+
+    private double calculateLateralLimit(MovementStates states, MovementManager manager) {
+        var settings = manager.getSettings();
+        double maxSpeed;
+
+        if (states.flying) {
+            maxSpeed = settings.horizontalFlySpeed;
+        } else {
+            double forwardMult = states.sprinting 
+                ? settings.forwardSprintSpeedMultiplier 
+                : settings.forwardRunSpeedMultiplier;
+            double strafeMult = settings.strafeRunSpeedMultiplier;
+            
+            double forward = settings.baseSpeed * forwardMult;
+            double strafe = settings.baseSpeed * strafeMult;
+            maxSpeed = Math.hypot(forward, strafe);
+
+            if (!states.onGround) {
+                maxSpeed *= settings.airSpeedMultiplier;
+            }
+        }
+
+        return (maxSpeed * SPEED_BUFFER_MULTIPLIER) + LATERAL_BUFFER_ADDITIVE;
+    }
+}
+```
+
+## Example: Packet rate limiting
+
+You can override `onInputQueue()` to detect packet flooding:
+
+```java
+public class PacketRateCheck extends Check {
+
+    private static final int MAX_UPDATES_PER_TICK = 20;
+
+    @Override
+    public String getName() {
+        return "PacketRate";
+    }
+
+    @Override
+    public String getDescription() {
+        return "Checks for excessive packet rate";
+    }
+
+    @Override
+    public CheckResult onInputQueue(UUID playerId, int queueSize) {
+        if (queueSize > MAX_UPDATES_PER_TICK) {
+            return CheckResult.fail("Packet Rate Exceeded", 3.0);
+        }
+        return CheckResult.passed();
+    }
+
+    @Override
+    public CheckResult onMovementUpdate(
+            UUID playerId,
+            PlayerRef playerRef,
+            PlayerInput.InputUpdate update,
+            Vector3d fromPosition,
+            Vector3d toPosition,
+            MovementStates movementStates,
+            MovementManager movementManager,
+            float dt,
+            boolean inServerVelocity
+    ) {
+        return CheckResult.passed();
+    }
+}
+```
+
+## Registering your check
+
+To register your custom check with Spectre:
+
+<Steps>
+  <Step title="Get the CheckManager instance">
+    Access the `CheckManager` from your plugin's `ACInputSystem` or store it during plugin initialization.
+  </Step>
+
+  <Step title="Call registerCheck()">
+    ```java
+    checkManager.registerCheck(new MyCustomCheck());
+    ```
+  </Step>
+
+  <Step title="Checks run automatically">
+    Spectre will now call your check for every player movement update.
+  </Step>
+</Steps>
+
+## Lifecycle callbacks
+
+You can override `onPlayerLogout()` to clean up per-player state:
+
+```java
+private final Map<UUID, Integer> playerData = new HashMap<>();
+
+@Override
+public void onPlayerLogout(UUID playerId) {
+    playerData.remove(playerId);
+}
+```
+
+<Note>
+Spectre automatically cleans up violation levels and alert cooldowns on logout. You only need this callback if your check maintains custom per-player state.
+</Note>
+
+## Best practices
+
+- **Use buffers**: Add tolerance to limits to account for network latency and server lag
+- **Respect inServerVelocity**: Exempt checks when the server applies velocity (knockback, abilities)
+- **Weight violations appropriately**: Use low weights (1-2) for minor violations, high weights (10+) for blatant cheating
+- **Filter input types**: Check if `update` is the type you care about (AbsoluteMovement, RelativeMovement, SetMovementStates)
+- **Log failures during development**: Use `HytaleLogger` to debug false positives
+- **Clean up state**: Override `onPlayerLogout()` if you store per-player data

@@ -1,0 +1,302 @@
+---
+title: Contribution guidelines
+description: Code style, testing standards, and the pull request process
+---
+
+This guide outlines the standards and processes for contributing to Spectre. Following these guidelines helps maintain code quality and makes it easier to review and merge your contributions.
+
+## Code style
+
+Consistent code style makes the codebase easier to read and maintain.
+
+### Java conventions
+
+Spectre follows standard Java conventions:
+
+- **Indentation:** Use 4 spaces (not tabs)
+- **Braces:** Use K&R style (opening brace on the same line)
+- **Naming:**
+  - Classes: `PascalCase` (e.g., `CheckManager`, `AnticheatPlugin`)
+  - Methods/variables: `camelCase` (e.g., `checkPlayer`, `violationCount`)
+  - Constants: `UPPER_SNAKE_CASE` (e.g., `MAX_VIOLATIONS`, `LOGGER`)
+- **Package structure:** Use `dev.solarion.anticheat.*` for all new code
+
+### Example
+
+```java
+package dev.solarion.anticheat.check.movement;
+
+import dev.solarion.anticheat.check.Check;
+import dev.solarion.anticheat.check.CheckResult;
+import com.hypixel.hytale.server.core.entity.player.Player;
+
+public class SpeedCheck implements Check {
+    private static final double MAX_SPEED = 10.0;
+    
+    @Override
+    public CheckResult check(Player player) {
+        double speed = calculateSpeed(player);
+        
+        if (speed > MAX_SPEED) {
+            return CheckResult.violation(
+                "Speed too high: " + speed,
+                player
+            );
+        }
+        
+        return CheckResult.pass();
+    }
+    
+    private double calculateSpeed(Player player) {
+        // Implementation
+        return 0.0;
+    }
+}
+```
+
+### Comments
+
+Add comments where the logic isn't immediately obvious:
+
+- Explain **why** you're doing something, not **what** you're doing
+- Document complex algorithms or checks
+- Use JavaDoc for public APIs
+
+```java
+/**
+ * Checks if a player is moving faster than legitimate movement allows.
+ * Uses the last known position to calculate velocity over time.
+ */
+public class SpeedCheck implements Check {
+    // ...
+}
+```
+
+<Note>
+Avoid over-commenting. Well-named variables and methods are better than comments explaining unclear code.
+</Note>
+
+## Writing checks
+
+If you're implementing a new anticheat check, follow these guidelines:
+
+### Check structure
+
+All checks implement the `Check` interface defined in `src/main/java/dev/solarion/anticheat/check/Check.java`.
+
+Your check should:
+- Be focused on a single type of violation (e.g., flight, speed, reach)
+- Return a `CheckResult` indicating pass or violation
+- Be registered in `CheckManager`
+
+### Avoid false positives
+
+False positives erode trust in the anticheat. When implementing checks:
+
+- Test thoroughly with legitimate gameplay
+- Account for lag and network latency
+- Add tolerance thresholds where appropriate
+- Consider edge cases (e.g., knockback, teleports, server lag)
+
+### Performance
+
+Checks run frequently (often every tick). Keep them lightweight:
+
+- Avoid expensive operations like file I/O or network calls
+- Cache values when possible
+- Use efficient data structures
+- Profile your code if you're unsure about performance
+
+<Info>
+If a check requires heavy computation, consider running it less frequently or on a separate thread.
+</Info>
+
+## Testing requirements
+
+All contributions must be tested before submission.
+
+### Local testing
+
+Before submitting a pull request:
+
+1. Build the plugin with `./gradlew shadowJar`
+2. Run the server with `./start_server.sh`
+3. Connect to the server and test your changes
+4. Verify that:
+   - Your code works as intended
+   - You haven't introduced false positives
+   - No new errors appear in server logs
+
+### Unit tests
+
+If you're adding new checks or modifying core logic, write unit tests:
+
+```java
+package dev.solarion.anticheat.check.movement;
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class SpeedCheckTest {
+    @Test
+    void testLegitimateSpeed() {
+        SpeedCheck check = new SpeedCheck();
+        // Mock player with normal speed
+        CheckResult result = check.check(mockPlayer);
+        assertFalse(result.isViolation());
+    }
+    
+    @Test
+    void testExcessiveSpeed() {
+        SpeedCheck check = new SpeedCheck();
+        // Mock player moving too fast
+        CheckResult result = check.check(mockPlayer);
+        assertTrue(result.isViolation());
+    }
+}
+```
+
+Run tests with:
+
+```bash
+./gradlew test
+```
+
+## Pull request process
+
+When you're ready to submit your contribution, follow these steps:
+
+<Steps>
+  <Step title="Fork and clone">
+    Fork the Spectre repository on GitHub and clone your fork locally.
+  </Step>
+  
+  <Step title="Create a branch">
+    Create a new branch for your changes:
+    ```bash
+    git checkout -b feature/my-new-check
+    ```
+    Use descriptive branch names like `fix/speed-check-false-positive` or `feature/reach-check`.
+  </Step>
+  
+  <Step title="Make your changes">
+    Implement your changes following the code style and testing guidelines.
+  </Step>
+  
+  <Step title="Test locally">
+    Run the plugin on a local server and verify everything works correctly.
+  </Step>
+  
+  <Step title="Commit your changes">
+    Write clear, concise commit messages:
+    ```bash
+    git commit -m "Add reach check for combat detection"
+    ```
+  </Step>
+  
+  <Step title="Push to your fork">
+    ```bash
+    git push origin feature/my-new-check
+    ```
+  </Step>
+  
+  <Step title="Open a pull request">
+    Go to the Spectre repository on GitHub and open a pull request from your branch.
+  </Step>
+</Steps>
+
+### PR template
+
+When you open a pull request, you'll see a template with the following sections:
+
+```markdown
+## What's in this PR?
+
+Briefly describe the changes you've made and why.
+
+## Type of Change
+
+- [ ] Bug fix — Resolves an issue without breaking existing behavior
+- [ ] New feature — Adds new functionality
+- [ ] Breaking change — Existing behavior will change
+- [ ] Docs — Documentation only
+- [ ] Refactor — Code improvements without changing behavior
+
+## Before You Submit
+
+- [ ] I've tested these changes on a local server
+- [ ] My code is readable and follows project conventions
+- [ ] I've added comments where the logic isn't obvious
+- [ ] No new warnings are introduced
+
+## Related Issues
+
+If this fixes an issue, link it here (e.g., "Fixes #42").
+```
+
+Fill out all sections completely. This helps reviewers understand your changes and speeds up the review process.
+
+<Note>
+If your PR addresses an open issue, reference it with "Fixes #42" or "Closes #42". GitHub will automatically link and close the issue when the PR is merged.
+</Note>
+
+### PR review
+
+Once you submit a PR:
+
+- A maintainer will review your code
+- They may request changes or ask questions
+- Address feedback by pushing new commits to your branch
+- Once approved, a maintainer will merge your PR
+
+## What makes a good contribution?
+
+The best contributions:
+
+- **Solve a real problem** — Address an actual bug, exploit, or missing feature
+- **Are well-tested** — You've verified the change works on a live server
+- **Are focused** — One PR should address one issue or feature
+- **Are documented** — Code is clear, and complex logic is explained
+- **Follow conventions** — Code style matches the rest of the project
+
+## Contribution standards
+
+### Code quality
+
+- No new compiler warnings
+- No deprecated API usage (unless necessary)
+- Follows the existing code structure and patterns
+- Handles edge cases gracefully
+
+### Commit hygiene
+
+- Commit messages are clear and descriptive
+- Commits are logical units of work (not "fix", "fix2", "actually fix")
+- No sensitive information (API keys, credentials) in commits
+
+### Communication
+
+- PR descriptions explain **why** the change is needed, not just **what** changed
+- Respond to review feedback in a timely manner
+- Ask questions if something is unclear
+
+## Contributor License Agreement
+
+By submitting a pull request, you agree that your contributions will be licensed under the GNU Affero General Public License v3.0 (AGPL-3.0), the same license as Spectre.
+
+You confirm that:
+- You have the right to submit the code
+- Your contribution is your original work or properly attributed
+- You understand the code will be publicly available under AGPL-3.0
+
+## Getting help
+
+If you're stuck or have questions:
+
+- Comment on the relevant issue or PR
+- Review existing code in `src/main/java/dev/solarion/anticheat/` for examples
+- Check the [development setup guide](/contributing/development-setup) for environment issues
+
+We're here to help. Don't hesitate to ask questions — contributing to open source is a learning process.
+
+Thank you for helping make Spectre better.

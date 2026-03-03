@@ -1,0 +1,151 @@
+---
+title: Mantle check
+description: Prevents mantle glitches and state spoofing
+---
+
+The mantle check detects two types of mantling exploits: the **mantle-into-ceiling glitch** and **prolonged mantle state spoofing**. Mantling is Hytale's climbing mechanic, and these exploits can allow players to phase through blocks or maintain infinite climb speed.
+
+## What it detects
+
+This check detects:
+- **Mantle-into-ceiling glitch**: Mantling while grounded (impossible in normal gameplay)
+- **Spoofed mantle state**: Maintaining the mantling state for longer than physically possible
+
+## How it works
+
+The check uses two detection methods:
+
+### 1. Mantle-into-ceiling detection
+
+This glitch occurs when a player claims to be both grounded and mantling simultaneously:
+
+```java
+if (update instanceof PlayerInput.AbsoluteMovement) {
+     if (movementStates.onGround && movementStates.mantling) {
+        return CheckResult.fail("Mantle-Into-Ceiling", 5.0);
+    }
+}
+```
+
+In normal gameplay, you can't be grounded and mantling at the same time. This state combination indicates a collision glitch exploit.
+
+### 2. Prolonged mantle state detection
+
+The check tracks how many ticks each player has been in the mantling state:
+
+```java
+if (update instanceof PlayerInput.SetMovementStates(MovementStates newStates)) {
+    if (newStates.mantling) {
+        int mantleTicks = mantleTickCounts.getOrDefault(playerId, 0) + 1;
+        mantleTickCounts.put(playerId, mantleTicks);
+
+        if (mantleTicks > MAX_MANTLE_TICKS) {
+            return CheckResult.fail("Spoofed Mantle State", 5.0);
+        }
+    } else {
+        mantleTickCounts.remove(playerId);
+    }
+}
+```
+
+Mantling animations complete in under a second. If a player maintains the mantling state for more than **30 ticks (~1 second)**, they're likely spoofing the state.
+
+## State tracking
+
+The check maintains a `ConcurrentHashMap` to track mantle tick counts per player:
+
+```java
+private final Map<UUID, Integer> mantleTickCounts = new ConcurrentHashMap<>();
+```
+
+This map is automatically cleaned up when players log out:
+
+```java
+@Override
+public void onPlayerLogout(UUID playerId) {
+    mantleTickCounts.remove(playerId);
+}
+```
+
+<Info>
+The `ConcurrentHashMap` ensures thread-safe access since movement processing may occur across multiple threads.
+</Info>
+
+## Maximum mantle duration
+
+**MAX_MANTLE_TICKS = 30** (~1 second at 30 TPS)
+
+This threshold represents the maximum time a normal mantle action should take. Exceeding this indicates state spoofing.
+
+## VL weight
+
+**5.0** - High severity. Both mantle exploits indicate deliberate abuse:
+- Mantle-into-ceiling enables block phasing
+- Prolonged mantle state enables infinite climbing
+
+<Warning>
+Mantle exploits are particularly dangerous in PvP or parkour scenarios where vertical movement advantages are critical.
+</Warning>
+
+## When it triggers
+
+### Mantle-into-ceiling
+- Using collision glitches to phase through ceilings
+- Exploiting block clip vulnerabilities
+- Manipulating movement states to bypass collision detection
+
+### Spoofed mantle state
+- Maintaining mantle state through client modification
+- Using movement hacks that fake climbing animations
+- Timer exploits that extend mantle duration
+
+## When it doesn't trigger
+
+- Normal mantling actions that complete quickly
+- Players who exit mantle state within 30 ticks
+- Mantling while not grounded (normal behavior)
+
+## Implementation reference
+
+**Source**: `MantleCheck.java:46-64`
+
+```java
+@Override
+public CheckResult onMovementUpdate(
+        UUID playerId,
+        PlayerRef playerRef,
+        PlayerInput.InputUpdate update,
+        Vector3d fromPosition,
+        Vector3d toPosition,
+        MovementStates movementStates,
+        MovementManager movementManager,
+        float dt,
+        boolean inServerVelocity
+) {
+    if (update instanceof PlayerInput.AbsoluteMovement) {
+         if (movementStates.onGround && movementStates.mantling) {
+            LOGGER.at(Level.WARNING).log("[Mantle] FAILED: Mantle-into-ceiling glitch");
+            return CheckResult.fail("Mantle-Into-Ceiling", 5.0);
+        }
+    }
+
+    if (update instanceof PlayerInput.SetMovementStates(MovementStates newStates)) {
+        if (newStates.mantling) {
+            int mantleTicks = mantleTickCounts.getOrDefault(playerId, 0) + 1;
+            mantleTickCounts.put(playerId, mantleTicks);
+
+            if (mantleTicks > MAX_MANTLE_TICKS) {
+                LOGGER.at(Level.WARNING).log("[Mantle] FAILED: Prolonged mantle state (%d ticks)", mantleTicks);
+                return CheckResult.fail("Spoofed Mantle State", 5.0);
+            }
+        } else {
+            mantleTickCounts.remove(playerId);
+        }
+    }
+
+    return CheckResult.passed();
+}
+```
+
+Key constant:
+- `MAX_MANTLE_TICKS = 30` (~1 second)

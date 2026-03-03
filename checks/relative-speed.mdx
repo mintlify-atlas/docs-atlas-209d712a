@@ -1,0 +1,117 @@
+---
+title: Relative speed check
+description: Detects excessive relative movement in client packets
+---
+
+The relative speed check monitors `RelativeMovement` packets for abnormal movement magnitudes. Unlike the absolute speed check, this validates the raw movement vector sent by the client.
+
+## What it detects
+
+This check detects:
+- **Spoofed relative movement packets**: Clients sending excessively large movement vectors
+- **Movement packet manipulation**: Altered X/Y/Z values in relative movement updates
+- **Protocol exploits**: Malicious clients abusing the relative movement packet format
+
+<Info>
+Relative movement packets allow clients to send position updates as offsets from their current position, rather than absolute coordinates. This is more bandwidth-efficient but can be exploited.
+</Info>
+
+## How it works
+
+The check calculates the magnitude of the relative movement vector and compares it to a fixed threshold:
+
+```java
+if (update instanceof PlayerInput.RelativeMovement relativeMovement) {
+    double magnitude = Math.sqrt(
+            relativeMovement.getX() * relativeMovement.getX() +
+            relativeMovement.getY() * relativeMovement.getY() +
+            relativeMovement.getZ() * relativeMovement.getZ()
+    );
+
+    if (magnitude > MAX_RELATIVE_MOVEMENT) {
+        return CheckResult.fail("Relative Movement Speed", 3.0);
+    }
+}
+```
+
+The magnitude is computed as the Euclidean distance:
+
+```
+magnitude = √(x² + y² + z²)
+```
+
+If this magnitude exceeds **2.0**, the check fails.
+
+## Maximum threshold
+
+**MAX_RELATIVE_MOVEMENT = 2.0**
+
+This threshold represents the maximum allowed relative movement magnitude per packet. It's intentionally set low to catch protocol-level exploits.
+
+<Warning>
+This check only applies to `RelativeMovement` packets. Absolute movement packets are validated by the Speed check instead.
+</Warning>
+
+## VL weight
+
+**3.0** - Moderate severity. Exceeding the relative movement threshold indicates deliberate packet manipulation rather than normal gameplay.
+
+## When it triggers
+
+- Modified clients sending large relative movement vectors
+- Protocol exploits that manipulate packet values
+- Teleportation hacks using relative movement
+- Position desync attacks
+
+## When it doesn't trigger
+
+- Absolute movement packets (handled by Speed check)
+- Server-authorized teleportation
+- Normal player movement within the 2.0 threshold
+- Movement during server velocity application
+
+## Difference from speed check
+
+The **speed check** validates actual position changes against movement physics, accounting for movement states, server settings, and time deltas.
+
+The **relative speed check** validates the raw packet data itself, ensuring clients don't send malformed movement vectors.
+
+Both checks work together:
+- Relative speed catches protocol exploits
+- Speed check catches physics exploits
+
+## Implementation reference
+
+**Source**: `RelativeSpeedCheck.java:42-52`
+
+```java
+@Override
+public CheckResult onMovementUpdate(
+        UUID playerId,
+        PlayerRef playerRef,
+        PlayerInput.InputUpdate update,
+        Vector3d fromPosition,
+        Vector3d toPosition,
+        MovementStates movementStates,
+        MovementManager movementManager,
+        float dt,
+        boolean inServerVelocity
+) {
+    if (update instanceof PlayerInput.RelativeMovement relativeMovement) {
+        double magnitude = Math.sqrt(
+                relativeMovement.getX() * relativeMovement.getX() +
+                relativeMovement.getY() * relativeMovement.getY() +
+                relativeMovement.getZ() * relativeMovement.getZ()
+        );
+
+        if (magnitude > MAX_RELATIVE_MOVEMENT) {
+            LOGGER.at(Level.WARNING).log("[RelativeSpeed] FAILED: Relative movement magnitude %.2f > %.2f", magnitude, MAX_RELATIVE_MOVEMENT);
+            return CheckResult.fail("Relative Movement Speed", 3.0);
+        }
+    }
+    return CheckResult.passed();
+}
+```
+
+Key constant:
+- `MAX_RELATIVE_MOVEMENT = 2.0`

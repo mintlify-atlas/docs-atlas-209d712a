@@ -1,0 +1,169 @@
+---
+title: Speed check
+description: Validates lateral and vertical movement speed against server limits
+---
+
+The speed check validates that players don't exceed maximum lateral (horizontal) and vertical movement speeds. It accounts for different movement states like sprinting, crouching, walking, and air movement.
+
+## What it detects
+
+This check detects:
+- **Lateral speed hacks**: Moving faster than allowed horizontally
+- **Vertical speed exploits**: Jumping or ascending faster than physics allow
+- **Movement state manipulation**: Exploiting sprint/crouch speed multipliers
+
+## How it works
+
+The speed check calculates the player's movement speed by comparing their position change over time (`dt`), then validates it against server-defined limits:
+
+1. **Calculate movement delta**: `toPosition - fromPosition`
+2. **Extract lateral speed**: Horizontal movement (X and Z axes) divided by `dt`
+3. **Extract vertical speed**: Vertical movement (Y axis) divided by `dt`
+4. **Get speed limits**: Based on movement state and server settings
+5. **Compare**: Flag if speed exceeds limit
+
+### Lateral speed calculation
+
+The check calculates lateral speed using the horizontal components:
+
+```java
+var lateralDelta = new Vector3d(delta.x, 0, delta.z);
+var lateralSpeed = lateralDelta.length() / dt;
+double lateralLimit = getLateralLimit(movementStates, movementManager);
+
+if (lateralSpeed > lateralLimit) {
+    return CheckResult.fail("Lateral Speed", 2.0);
+}
+```
+
+The lateral limit is calculated using the player's movement state:
+
+```java
+private double getLateralLimit(MovementStates movementStates, MovementManager movementManager) {
+    var settings = movementManager.getSettings();
+    double maxLateralSpeed;
+
+    if (movementStates.flying) {
+        maxLateralSpeed = settings.horizontalFlySpeed;
+    } else {
+        double forwardMultiplier;
+        double strafeMultiplier;
+
+        if (movementStates.crouching) {
+            forwardMultiplier = settings.forwardCrouchSpeedMultiplier;
+            strafeMultiplier = settings.strafeCrouchSpeedMultiplier;
+        } else if (movementStates.sprinting) {
+            forwardMultiplier = settings.forwardSprintSpeedMultiplier;
+            strafeMultiplier = settings.strafeRunSpeedMultiplier;
+        } else if (movementStates.walking) {
+            forwardMultiplier = settings.forwardWalkSpeedMultiplier;
+            strafeMultiplier = settings.strafeWalkSpeedMultiplier;
+        } else {
+            forwardMultiplier = settings.forwardRunSpeedMultiplier;
+            strafeMultiplier = settings.strafeRunSpeedMultiplier;
+        }
+
+        double forwardComponent = settings.baseSpeed * forwardMultiplier;
+        double strafeComponent = settings.baseSpeed * strafeMultiplier;
+        maxLateralSpeed = Math.hypot(forwardComponent, strafeComponent);
+
+        if (!movementStates.onGround) {
+            maxLateralSpeed *= settings.airSpeedMultiplier;
+            maxLateralSpeed *= settings.comboAirSpeedMultiplier;
+            maxLateralSpeed *= COMBAT_MOMENTUM_MULTIPLIER;
+        }
+    }
+
+    return (maxLateralSpeed * SPEED_BUFFER_MULTIPLIER) + LATERAL_BUFFER_ADDITIVE;
+}
+```
+
+### Vertical speed calculation
+
+Vertical speed is checked only when the player is not falling:
+
+```java
+var verticalSpeed = Math.abs(delta.y) / dt;
+double verticalLimit = getVerticalLimit(movementStates, movementManager, delta.y);
+
+if (verticalSpeed > verticalLimit && !movementStates.falling) {
+    return CheckResult.fail("Vertical Speed", 2.0);
+}
+```
+
+## Buffer multipliers
+
+The check includes buffer multipliers to account for network latency and physics edge cases:
+
+- **SPEED_BUFFER_MULTIPLIER**: 1.35x (applied to base speed)
+- **VERTICAL_BUFFER_ADDITIVE**: +1.35 (added to vertical limit)
+- **LATERAL_BUFFER_ADDITIVE**: +1.35 (added to lateral limit)
+- **COMBAT_MOMENTUM_MULTIPLIER**: 1.2x (applied during air movement)
+
+<Info>
+These buffers prevent false positives from network jitter and server tick timing. You can adjust these constants in the source code if you experience false flags.
+</Info>
+
+## Special cases
+
+The check allows certain movement patterns:
+
+### Step-up movement
+
+Players can step up blocks up to 1.1 blocks high:
+
+```java
+if (movementStates.onGround && !movementStates.mantling) {
+    double deltaY = toPosition.y - fromPosition.y;
+    if (deltaY > 0 && deltaY <= MAX_STEP_HEIGHT) {
+        return CheckResult.passed();
+    }
+}
+```
+
+### Mantling
+
+Mantling movement is exempt from speed checks:
+
+```java
+if (movementStates.mantling) {
+    return CheckResult.passed();
+}
+```
+
+### Server velocity
+
+When the player is under server-applied velocity (like knockback or explosions), the check is bypassed:
+
+```java
+if (inServerVelocity) {
+    return CheckResult.passed();
+}
+```
+
+## VL weight
+
+**2.0** - This is the lowest weight among severity-flagged checks because speed violations can occur from network lag or server performance issues.
+
+<Warning>
+While individual speed violations have low VL weight, repeated violations accumulate quickly. A player consistently exceeding speed limits will reach punishment thresholds.
+</Warning>
+
+## When it triggers
+
+- Using speed hacks or movement multiplier mods
+- Exploiting movement state transitions (sprint-jump combinations)
+- Timer modifications that accelerate movement
+- Phase/flight exploits that bypass vertical limits
+
+## Implementation reference
+
+**Source**: `SpeedCheck.java:37-91`
+
+Key constants:
+- `MAX_STEP_HEIGHT = 1.1`
+- `MAX_FALLING_SPEED = 60.0`
+- `SPEED_BUFFER_MULTIPLIER = 1.35`
+- `VERTICAL_BUFFER_ADDITIVE = 1.35`
+- `LATERAL_BUFFER_ADDITIVE = 1.35`
+- `COMBAT_MOMENTUM_MULTIPLIER = 1.2`

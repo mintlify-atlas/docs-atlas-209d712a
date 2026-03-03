@@ -1,0 +1,385 @@
+---
+title: Integration
+description: Integrate Spectre into your Hytale server plugin or mod
+---
+
+Spectre is designed to be integrated into Hytale server plugins as a library. You can use it as-is with the built-in checks, or extend it with your own custom detection logic.
+
+## Plugin structure
+
+Spectre follows the standard Hytale plugin architecture:
+
+```java
+public class AnticheatPlugin extends JavaPlugin {
+    
+    public AnticheatPlugin(@Nonnull JavaPluginInit init) {
+        super(init);
+    }
+
+    @Override
+    protected void setup() {
+        // Initialize Spectre here
+    }
+}
+```
+
+## Basic integration
+
+Here's how to integrate Spectre into your server plugin:
+
+<Steps>
+  <Step title="Create a CheckManager instance">
+    The `CheckManager` coordinates all checks, tracks violations, and manages alerts.
+
+    ```java
+    @Override
+    protected void setup() {
+        CheckManager checkManager = new CheckManager();
+    }
+    ```
+  </Step>
+
+  <Step title="Register event listeners">
+    Spectre requires three event listeners:
+
+    ```java
+    // Handle player kicks
+    this.getEventRegistry().registerGlobal(
+        RemoveCheatingPlayerEvent.class, 
+        new KickListener(checkManager)::onRemoveCheatingPlayerEvent
+    );
+
+    // Handle player disconnect
+    this.getEventRegistry().registerGlobal(
+        PlayerDisconnectEvent.class, 
+        new PlayerListener(checkManager)::onPlayerDisconnect
+    );
+
+    // Handle player connect
+    this.getEventRegistry().registerGlobal(
+        PlayerConnectEvent.class, 
+        new PlayerListener(checkManager)::onPlayerConnect
+    );
+    ```
+  </Step>
+
+  <Step title="Register the ACInputSystem">
+    This ECS system hooks into Hytale's input processing to run checks:
+
+    ```java
+    this.getEntityStoreRegistry().registerSystem(
+        new ACInputSystem(checkManager)
+    );
+    ```
+  </Step>
+</Steps>
+
+## Complete integration example
+
+Here's the complete plugin setup from Spectre's source:
+
+```java
+package dev.solarion.anticheat;
+
+import com.hypixel.hytale.logger.HytaleLogger;
+import com.hypixel.hytale.server.core.plugin.JavaPlugin;
+import com.hypixel.hytale.server.core.plugin.JavaPluginInit;
+import com.hypixel.hytale.server.core.event.events.player.PlayerDisconnectEvent;
+import com.hypixel.hytale.server.core.event.events.player.PlayerConnectEvent;
+import dev.solarion.anticheat.check.CheckManager;
+import dev.solarion.anticheat.event.RemoveCheatingPlayerEvent;
+import dev.solarion.anticheat.listener.KickListener;
+import dev.solarion.anticheat.listener.PlayerListener;
+import dev.solarion.anticheat.system.ACInputSystem;
+
+import javax.annotation.Nonnull;
+
+public class AnticheatPlugin extends JavaPlugin {
+    private static final HytaleLogger LOGGER = HytaleLogger.forEnclosingClass();
+
+    public AnticheatPlugin(@Nonnull JavaPluginInit init) {
+        super(init);
+    }
+
+    @Override
+    protected void setup() {
+        LOGGER.atInfo().log("Setting up Anticheat");
+
+        CheckManager checkManager = new CheckManager();
+
+        this.getEventRegistry().registerGlobal(
+            RemoveCheatingPlayerEvent.class, 
+            new KickListener(checkManager)::onRemoveCheatingPlayerEvent
+        );
+        
+        this.getEventRegistry().registerGlobal(
+            PlayerDisconnectEvent.class, 
+            new PlayerListener(checkManager)::onPlayerDisconnect
+        );
+        
+        this.getEventRegistry().registerGlobal(
+            PlayerConnectEvent.class, 
+            new PlayerListener(checkManager)::onPlayerConnect
+        );
+        
+        this.getEntityStoreRegistry().registerSystem(
+            new ACInputSystem(checkManager)
+        );
+    }
+}
+```
+
+## Event listeners
+
+Spectre requires two listener classes to handle player lifecycle events:
+
+### KickListener
+
+Handles the `RemoveCheatingPlayerEvent` by actually kicking the player:
+
+```java
+public class KickListener {
+    private final CheckManager checkManager;
+
+    public KickListener(CheckManager checkManager) {
+        this.checkManager = checkManager;
+    }
+
+    public void onRemoveCheatingPlayerEvent(RemoveCheatingPlayerEvent event) {
+        event.player().kick(event.reason());
+    }
+}
+```
+
+### PlayerListener
+
+Cleans up state when players connect/disconnect:
+
+```java
+public class PlayerListener {
+    private final CheckManager checkManager;
+
+    public PlayerListener(CheckManager checkManager) {
+        this.checkManager = checkManager;
+    }
+
+    public void onPlayerConnect(PlayerConnectEvent event) {
+        checkManager.onPlayerConnect(event.getPlayer().getUuid());
+    }
+
+    public void onPlayerDisconnect(PlayerDisconnectEvent event) {
+        checkManager.onPlayerLogout(event.getPlayer().getUuid());
+    }
+}
+```
+
+## Registering custom checks
+
+After creating the `CheckManager`, you can register custom checks:
+
+```java
+CheckManager checkManager = new CheckManager();
+
+// Register your custom check
+checkManager.registerCheck(new MyCustomCheck());
+
+// ACInputSystem automatically registers built-in checks
+this.getEntityStoreRegistry().registerSystem(
+    new ACInputSystem(checkManager)
+);
+```
+
+<Note>
+The `ACInputSystem` constructor automatically registers Spectre's built-in checks (SpeedCheck, FlightCheck, MantleCheck, RelativeSpeedCheck, PacketRateCheck).
+</Note>
+
+## System execution order
+
+The `ACInputSystem` runs **before** Hytale's input processing systems:
+
+```java
+private final Set<Dependency<EntityStore>> deps = Set.of(
+    new SystemDependency<>(Order.BEFORE, PlayerSystems.ProcessPlayerInput.class),
+    new SystemDependency<>(Order.BEFORE, PlayerSystems.BlockPausedMovementSystem.class),
+    new SystemDependency<>(Order.BEFORE, MountSystems.HandleMountInput.class),
+    new SystemDependency<>(Order.BEFORE, DamageSystems.FallDamagePlayers.class),
+    new SystemDependency<>(Order.BEFORE, KnockbackPredictionSystems.CaptureKnockbackInput.class)
+);
+```
+
+This ensures checks run before movement is applied, allowing Spectre to cancel invalid input.
+
+## Permissions
+
+Spectre uses two permissions:
+
+### solarion.anticheat.bypass
+
+Players with this permission are completely exempt from all checks.
+
+```java
+if (playerComponent.hasPermission("solarion.anticheat.bypass")) {
+    return; // Skip all checks
+}
+```
+
+### solarion.anticheat.alerts
+
+Players with this permission receive violation alerts in chat.
+
+```java
+if (PermissionsModule.get().hasPermission(ref.getUuid(), "solarion.anticheat.alerts")) {
+    ref.sendMessage(alertMessage);
+}
+```
+
+## Configuration constants
+
+You can modify these constants in your checks or in Spectre's source:
+
+### ViolationTracker
+
+```java
+public static final double KICK_THRESHOLD = 20.0;  // VL needed to kick
+public static final double DECAY_PER_TICK = 0.05;  // VL decay per tick
+```
+
+### AlertManager
+
+```java
+private static final long ALERT_COOLDOWN_MS = 2000;  // Alert throttle time
+```
+
+### ACInputSystem
+
+```java
+private static final long VELOCITY_EXEMPTION_DURATION_MS = 600;  // Server velocity exemption window
+```
+
+## Handling kicks
+
+When a player's VL reaches the kick threshold, Spectre dispatches a `RemoveCheatingPlayerEvent`. You can listen to this event to log kicks, notify admins, or integrate with ban systems:
+
+```java
+this.getEventRegistry().registerGlobal(
+    RemoveCheatingPlayerEvent.class,
+    event -> {
+        // Log to database
+        database.logKick(event.player().getUuid(), event.reason());
+        
+        // Notify admins
+        notifyAdmins("Player " + event.player().getUsername() + " was kicked: " + event.reason());
+        
+        // Temp ban after multiple kicks
+        if (shouldTempBan(event.player().getUuid())) {
+            banPlayer(event.player().getUuid(), "Multiple anticheat violations");
+        }
+    }
+);
+```
+
+<Warning>
+`RemoveCheatingPlayerEvent` is async. Do not perform blocking operations or interact with game state directly in the handler.
+</Warning>
+
+## Client correction
+
+When a check fails, Spectre teleports the player back to their last valid position:
+
+```java
+private static void cancelAndCorrect(
+    @Nonnull ArchetypeChunk<EntityStore> archetypeChunk,
+    @Nonnull CommandBuffer<EntityStore> commandBuffer,
+    int index,
+    @Nonnull Vector3d correctedPosition
+) {
+    // Send teleport packet to client
+    var teleportPacket = new ClientTeleport(
+        (byte) 0,
+        new ModelTransform(
+            PositionUtil.toPositionPacket(correctedPosition),
+            PositionUtil.toDirectionPacket(rotation),
+            PositionUtil.toDirectionPacket(headRotation)
+        ),
+        false
+    );
+    
+    // Reset movement states
+    var statePacket = new SetMovementStates(
+        new SavedMovementStates(false)
+    );
+    
+    playerRef.getPacketHandler().write(teleportPacket);
+    playerRef.getPacketHandler().write(statePacket);
+}
+```
+
+This prevents players from gaining an advantage from failed movement attempts.
+
+## Violation level decay
+
+VL automatically decays every tick:
+
+```java
+// In ACInputSystem.tick()
+checkManager.getViolationTracker().decay(playerId);
+```
+
+This allows players to recover from minor violations without being kicked. At 20 TPS, VL decays at 1.0 per second (0.05 per tick).
+
+## Server velocity exemptions
+
+Spectre tracks when the server applies velocity (knockback, dashes, launch pads) and exempts players for 600ms:
+
+```java
+private boolean checkServerVelocity(Store<EntityStore> store, Ref<EntityStore> entityRef, UUID playerId) {
+    var knockbackSim = store.getComponent(entityRef, KnockbackSimulation.getComponentType());
+    var velocityComponent = store.getComponent(entityRef, Velocity.getComponentType());
+    boolean hasPendingVelocity = velocityComponent != null && !velocityComponent.getInstructions().isEmpty();
+
+    if (hasPendingVelocity) {
+        velocityExemptionExpiry.put(playerId, System.currentTimeMillis() + VELOCITY_EXEMPTION_DURATION_MS);
+    }
+
+    long now = System.currentTimeMillis();
+    Long exemptExpiry = velocityExemptionExpiry.get(playerId);
+    boolean inVelocityExemption = exemptExpiry != null && now < exemptExpiry;
+    
+    return knockbackSim != null || hasPendingVelocity || inVelocityExemption;
+}
+```
+
+This prevents false positives when players use abilities or take knockback.
+
+## Testing your integration
+
+<Steps>
+  <Step title="Start your server">
+    Launch your Hytale server with the plugin loaded.
+  </Step>
+
+  <Step title="Check logs">
+    Verify you see:
+    ```
+    [INFO] Setting up Anticheat
+    ```
+  </Step>
+
+  <Step title="Test bypass permission">
+    Give yourself `solarion.anticheat.bypass` and verify you can fly in survival mode.
+  </Step>
+
+  <Step title="Test detection">
+    Remove the bypass permission and verify you get kicked for flying.
+  </Step>
+
+  <Step title="Test alerts">
+    Give yourself `solarion.anticheat.alerts` and verify you see violation messages when other players cheat.
+  </Step>
+</Steps>
+
+## Next steps
+
+- [Create custom checks](/development/custom-checks) to detect specific behaviors
+- [Explore the API reference](/development/api-reference) for detailed class documentation
+- Adjust violation weights and thresholds to match your server's needs
