@@ -78,10 +78,11 @@ public CheckResult onMovementUpdate(
 
 ## Disabling the check
 
-If you need to disable the flight check (for example, in a creative server), you can do so in your `config.yml`:
+Spectre's checks are hardcoded and cannot be disabled via configuration. If you need to disable the flight check (for example, in a creative server), you have two options:
 
-```yaml
-checks:
-  Flight:
-    enabled: false
-```
+1. **Grant bypass permission**: Give all players `solarion.anticheat.bypass` to exempt them from all checks
+2. **Modify the source**: Remove `FlightCheck` from the registration in `ACInputSystem.java:72` and rebuild
+
+<Note>
+Creative mode players are automatically bypassed, so the flight check won't trigger for players in creative mode.
+</Note>

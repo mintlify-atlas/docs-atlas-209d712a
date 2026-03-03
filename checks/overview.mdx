@@ -12,7 +12,7 @@ Checks are executed during the `onMovementUpdate` lifecycle hook, which processe
 - **Failure reason**: A descriptive string identifying what was detected
 - **VL weight**: The violation level weight to add to the player's total
 
-Violation levels accumulate over time. You can configure thresholds and punishments in your `config.yml`.
+Violation levels accumulate over time. Thresholds and VL weights are hardcoded in the source but can be modified by editing the check implementations.
 
 ## Available checks
 
@@ -109,8 +109,15 @@ public class MyCustomCheck extends Check {
 }
 ```
 
-Register your custom check in your plugin's `onEnable()` method:
+Since Spectre doesn't expose a public API, you'll need to modify the source to register custom checks. Add your check registration in `ACInputSystem.java`:
 
 ```java
-SpectreAPI.registerCheck(new MyCustomCheck());
+private void registerChecks() {
+    checkManager.registerCheck(new SpeedCheck());
+    checkManager.registerCheck(new RelativeSpeedCheck());
+    checkManager.registerCheck(new FlightCheck());
+    checkManager.registerCheck(new MantleCheck());
+    checkManager.registerCheck(new PacketRateCheck());
+    checkManager.registerCheck(new MyCustomCheck()); // Add your check here
+}
 ```
