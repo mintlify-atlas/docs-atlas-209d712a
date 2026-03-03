@@ -1,0 +1,91 @@
+{
+  "projectType": "framework",
+  "projectName": "Spectre",
+  "projectDescription": "A server-side anticheat framework for Hytale, built to combat exploits and keep servers fair.",
+  "theme": "aspen",
+  "primaryColor": "#e63946",
+  "lightColor": "#f1faee",
+  "darkColor": "#1d3557",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/check-system",
+              "concepts/violation-tracking",
+              "concepts/alert-system"
+            ]
+          },
+          {
+            "group": "Built-in Checks",
+            "pages": [
+              "checks/overview",
+              "checks/flight",
+              "checks/speed",
+              "checks/relative-speed",
+              "checks/mantle",
+              "checks/packet-rate"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/custom-checks",
+              "development/api-reference",
+              "development/integration"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/permissions",
+              "configuration/thresholds",
+              "configuration/advanced"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Contributing",
+        "groups": [
+          {
+            "group": "Community",
+            "pages": [
+              "contributing/overview",
+              "contributing/development-setup",
+              "contributing/guidelines"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Extensible check system with 5 built-in checks",
+    "Automatic violation tracking with decay",
+    "Permission-based staff alerts",
+    "ECS integration with Hytale server architecture",
+    "Automatic player enforcement and correction"
+  ],
+  "publicApiSurface": [
+    "Check (abstract class)",
+    "CheckManager",
+    "CheckResult",
+    "ViolationTracker",
+    "AlertManager",
+    "ACInputSystem",
+    "RemoveCheatingPlayerEvent"
+  ]
+}
